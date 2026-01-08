@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicLong
 class AbpWebSocketClient(
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(30, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build(),
 ) {
     companion object {
@@ -64,19 +66,29 @@ class AbpWebSocketClient(
         deviceId: String,
         callbacks: Callbacks,
     ) {
-        if (state != State.DISCONNECTED) return
+        Log.i(TAG, "connect() called, host=$host, state=$state")
+        
+        if (state != State.DISCONNECTED) {
+            Log.w(TAG, "Already connecting or connected, state=$state")
+            return
+        }
         setState(State.CONNECTING, callbacks)
         currentCallbacks = callbacks
 
         // 智能构建 WebSocket URL
         val url = buildWebSocketUrl(host)
+        Log.i(TAG, "Built WebSocket URL: $url")
+        
         val request = Request.Builder().url(url).build()
 
         callbacks.onLog("Connecting $url ...")
+        Log.i(TAG, "Creating WebSocket connection...")
+        
         ws = okHttpClient.newWebSocket(
             request,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Log.i(TAG, "onOpen: response=${response.code}")
                     callbacks.onLog("WS opened: ${response.code}")
                     setState(State.CONNECTED, callbacks)
 
@@ -94,19 +106,26 @@ class AbpWebSocketClient(
                             downlink = true,
                         ),
                     )
-                    webSocket.send(hello.toJson())
+                    val helloJson = hello.toJson()
+                    Log.i(TAG, "Sending hello: $helloJson")
+                    webSocket.send(helloJson)
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
+                    Log.i(TAG, "onMessage(text): $text")
                     callbacks.onLog("WS text: $text")
                     try {
                         val msg = AbpControlJson.parse(text)
                         when (msg) {
-                            is WelcomeMessage -> callbacks.onWelcome(msg)
+                            is WelcomeMessage -> {
+                                Log.i(TAG, "Received Welcome: sessionId=${msg.sessionId}")
+                                callbacks.onWelcome(msg)
+                            }
                             is PongMessage -> callbacks.onControlMessage(msg)
                             else -> callbacks.onControlMessage(msg)
                         }
                     } catch (e: Exception) {
+                        Log.e(TAG, "Parse control msg failed", e)
                         callbacks.onError("Parse control msg failed: ${e.message}")
                     }
                 }
@@ -128,28 +147,39 @@ class AbpWebSocketClient(
                             }
                         },
                         onFailure = { e ->
+                            Log.e(TAG, "Decode binary frame failed", e)
                             callbacks.onError("Decode binary frame failed: ${e.message}")
                         }
                     )
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    Log.e(TAG, "onFailure: ${t.message}, response=${response?.code}", t)
                     callbacks.onError("WS failure: ${t.message}")
                     callbacks.onLog("WS response: ${response?.code}")
                     setState(State.DISCONNECTED, callbacks)
                     currentCallbacks = null
+                    ws = null
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    Log.i(TAG, "onClosing: code=$code, reason=$reason")
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    Log.i(TAG, "onClosed: code=$code, reason=$reason")
                     callbacks.onLog("WS closed: $code $reason")
                     setState(State.DISCONNECTED, callbacks)
                     currentCallbacks = null
+                    ws = null
                 }
             },
         )
+        Log.i(TAG, "WebSocket created, waiting for callbacks...")
     }
 
     fun disconnect() {
+        Log.i(TAG, "disconnect() called")
         ws?.close(1000, "bye")
         ws = null
         currentCallbacks?.let { setState(State.DISCONNECTED, it) }
@@ -195,6 +225,7 @@ class AbpWebSocketClient(
     }
 
     private fun setState(newState: State, callbacks: Callbacks) {
+        Log.i(TAG, "setState: $state -> $newState")
         state = newState
         callbacks.onState(newState)
     }
@@ -207,12 +238,18 @@ class AbpWebSocketClient(
      * - 完整 URL: "ws://example.com/abp" -> 直接使用
      */
     private fun buildWebSocketUrl(host: String): String {
+        Log.d(TAG, "buildWebSocketUrl: input=$host")
+        
         // 如果已经是完整 URL，直接返回
         if (host.startsWith("ws://") || host.startsWith("wss://")) {
-            return if (host.endsWith("/abp")) host else "$host/abp"
+            val result = if (host.endsWith("/abp")) host else "$host/abp"
+            Log.d(TAG, "buildWebSocketUrl: already has protocol, result=$result")
+            return result
         }
 
         // 否则添加 ws:// 前缀
-        return "ws://$host/abp"
+        val result = "ws://$host/abp"
+        Log.d(TAG, "buildWebSocketUrl: added ws://, result=$result")
+        return result
     }
 }
