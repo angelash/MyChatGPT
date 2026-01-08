@@ -1,0 +1,88 @@
+{
+  "proto": "ABP/1.0",
+  "encoding": "hex",
+  "note": "每条 frameHex 都是一个完整 WebSocket Binary Message（单帧），用于两端做字节级对齐回归。",
+  "vectors": [
+    {
+      "name": "v01-downlink-empty",
+      "streamId": 1,
+      "seq": 1,
+      "timestampSamples": 0,
+      "payloadHex": "",
+      "frameHex": "01AB010101000000000000000000"
+    },
+    {
+      "name": "v02-downlink-010203",
+      "streamId": 1,
+      "seq": 2,
+      "timestampSamples": 960,
+      "payloadHex": "010203",
+      "frameHex": "01AB010102000000C00300000300010203"
+    },
+    {
+      "name": "v03-uplink-empty",
+      "streamId": 2,
+      "seq": 3,
+      "timestampSamples": 0,
+      "payloadHex": "",
+      "frameHex": "01AB010203000000000000000000"
+    },
+    {
+      "name": "v04-uplink-ascii-hi",
+      "streamId": 2,
+      "seq": 4,
+      "timestampSamples": 960,
+      "payloadHex": "6869",
+      "frameHex": "01AB010204000000C003000002006869"
+    },
+    {
+      "name": "v05-downlink-00",
+      "streamId": 1,
+      "seq": 5,
+      "timestampSamples": 1920,
+      "payloadHex": "00",
+      "frameHex": "01AB01010500000080070000010000"
+    },
+    {
+      "name": "v06-downlink-ff",
+      "streamId": 1,
+      "seq": 6,
+      "timestampSamples": 2880,
+      "payloadHex": "FF",
+      "frameHex": "01AB010106000000400B00000100FF"
+    },
+    {
+      "name": "v07-uplink-01020304",
+      "streamId": 2,
+      "seq": 7,
+      "timestampSamples": 0,
+      "payloadHex": "01020304",
+      "frameHex": "01AB01020700000000000000040001020304"
+    },
+    {
+      "name": "v08-uplink-deadbeef",
+      "streamId": 2,
+      "seq": 8,
+      "timestampSamples": 960,
+      "payloadHex": "DEADBEEF",
+      "frameHex": "01AB010208000000C00300000400DEADBEEF"
+    },
+    {
+      "name": "v09-downlink-utf8-nihao",
+      "streamId": 1,
+      "seq": 9,
+      "timestampSamples": 0,
+      "payloadHex": "E4BDA0E5A5BD",
+      "frameHex": "01AB010109000000000000000600E4BDA0E5A5BD"
+    },
+    {
+      "name": "v10-downlink-16bytes",
+      "streamId": 1,
+      "seq": 10,
+      "timestampSamples": 123456,
+      "payloadHex": "000102030405060708090A0B0C0D0E0F",
+      "frameHex": "01AB01010A00000040E201001000000102030405060708090A0B0C0D0E0F"
+    }
+  ]
+}
+

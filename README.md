@@ -11,16 +11,23 @@
 
 ## 当前状态
 
-- 已落盘：执行准备与决策点、工程初始化建议、推进计划、`proto/` 与 `tests/` 占位说明
-- 待确认：见 `docs/00-执行准备与决策点.md` 的“需要你回复我确认的信息”
+- 已落盘：执行准备与决策点、工程初始化建议、推进计划、`proto/` 与 `tests/`、协议测试向量
+- 已创建工程骨架：
+  - Windows：`src/windows/AudioBridge.sln`（托盘宿主 + 协议层 + WS Server 骨架）
+  - Android：`src/android/AudioBridgeClient`（minSdk=21，UI/协议层/WS Client 骨架）
 
-## 建议的下一步（你回复确认后我就开始创建工程骨架）
+## 怎么跑起来（当前是 WP4 骨架：只到握手/心跳，不含音频）
 
-请回复以下信息（复制填写即可）：
+### Windows（托盘 + WS Server）
 
-- 虚拟声卡品牌/设备名：____
-- 只用局域网还是要公网：____
-- Codec 先 PCM 还是 Opus：____
-- Android 手机系统版本：____
-- Android 用 Compose 还是 XML：____
-- Windows 监听端口：____（默认 21347 是否可用）
+1. 打开 `src/windows/AudioBridge.sln`
+2. 运行 `AudioBridge.Agent.Tray`
+3. 托盘右键 → **Start**（默认监听 **21347**）
+
+### Android（WS Client）
+
+1. Android Studio 打开 `src/android/AudioBridgeClient`
+2. 运行 App
+3. 填写 Host（Windows 的局域网 IP）+ Port（默认 21347）→ **Connect**
+
+> 备注：Android 工程如果提示缺少 `gradle-wrapper.jar`，见 `src/android/AudioBridgeClient/README.md` 的导入说明。
