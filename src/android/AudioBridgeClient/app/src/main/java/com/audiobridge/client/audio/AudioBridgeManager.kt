@@ -112,6 +112,34 @@ class AudioBridgeManager {
     }
 
     /**
+     * 动态启动麦克风捕获
+     */
+    fun startCapture(): Boolean {
+        if (capture.isRunning) return true
+        
+        capture.onFrameAvailable = { frame ->
+            uplinkFrameCount.incrementAndGet()
+            onUplinkFrame?.invoke(frame)
+        }
+        capture.onError = { msg ->
+            onError?.invoke("上行错误：$msg")
+        }
+        
+        val result = capture.start()
+        Log.i(TAG, "动态启动麦克风：$result")
+        return result
+    }
+
+    /**
+     * 动态停止麦克风捕获
+     */
+    fun stopCapture() {
+        if (!capture.isRunning) return
+        capture.stop()
+        Log.i(TAG, "动态停止麦克风")
+    }
+
+    /**
      * 写入下行音频帧（从 Windows 收到的系统声音）
      */
     fun writeDownlinkFrame(pcmFrame: ByteArray) {

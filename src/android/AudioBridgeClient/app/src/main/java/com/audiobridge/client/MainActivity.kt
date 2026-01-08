@@ -53,6 +53,17 @@ class MainActivity : AppCompatActivity() {
         uplinkSwitch.isChecked = true
         downlinkSwitch.isChecked = true
 
+        // 上行开关变化时动态启停麦克风
+        uplinkSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (audioManager.running) {
+                if (isChecked) {
+                    audioManager.startCapture()
+                } else {
+                    audioManager.stopCapture()
+                }
+            }
+        }
+
         // 设置音频回调
         audioManager.onUplinkFrame = { frame ->
             // 上行音频：麦克风 -> Windows
