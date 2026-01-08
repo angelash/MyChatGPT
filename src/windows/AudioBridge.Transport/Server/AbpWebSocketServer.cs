@@ -12,13 +12,15 @@ namespace AudioBridge.Transport.Server;
 
 /// <summary>
 /// v1 WebSocket 单连接承载：控制(JSON text) + 音频帧(binary)。
-/// 目前实现到：hello/welcome、ping/pong、binary frame 解码（不接音频）。
+/// 目前实现到：hello/welcome、ping/pong、binary frame 解码 + 音频转发。
 /// </summary>
 public sealed class AbpWebSocketServer : IAsyncDisposable
 {
     private readonly int _port;
     private readonly string? _token;
     private WebApplication? _app;
+    private WebSocket? _activeSession;
+    private uint _downlinkSeq;
 
     public AbpWebSocketServer(int port, string? token = null)
     {
@@ -30,6 +32,11 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     public string? Token => _token;
 
     public bool IsRunning => _app is not null;
+
+    /// <summary>
+    /// 当收到上行音频帧（从 Android 麦克风）时触发
+    /// </summary>
+    public event Action<byte[]>? UplinkFrameReceived;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -85,6 +92,10 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
 
     private async Task HandleSessionAsync(WebSocket ws, ILogger logger, CancellationToken ct)
     {
+        // v1: 单连接模式，后连接的会挤掉前一个
+        _activeSession = ws;
+        _downlinkSeq = 0;
+
         var buffer = new byte[64 * 1024];
         HelloMessage? hello = null;
 
@@ -153,9 +164,13 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                         continue;
                     }
 
-                    // TODO(WP5/WP6): 接到下行/上行音频链路
+                    // 上行音频帧（从 Android 麦克风）
+                    if (frame.StreamId == AbpStreamId.Uplink)
+                    {
+                        UplinkFrameReceived?.Invoke(frame.Payload.ToArray());
+                    }
+
                     _ = hello; // placeholder for future session binding
-                    _ = frame;
                 }
             }
         }
@@ -173,6 +188,11 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
         }
         finally
         {
+            if (_activeSession == ws)
+            {
+                _activeSession = null;
+            }
+
             if (ws.State == WebSocketState.Open)
             {
                 try
@@ -201,6 +221,39 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     {
         var bytes = Encoding.UTF8.GetBytes(text);
         return ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+    }
+
+    /// <summary>
+    /// 发送下行音频帧（系统声音 -> Android）
+    /// </summary>
+    public async Task SendDownlinkFrameAsync(byte[] pcmPayload, uint timestampSamples = 0)
+    {
+        var ws = _activeSession;
+        if (ws is null || ws.State != WebSocketState.Open)
+        {
+            return;
+        }
+
+        var seq = Interlocked.Increment(ref _downlinkSeq);
+        var frame = new AbpBinaryFrame(AbpStreamId.Downlink, seq, timestampSamples, pcmPayload);
+        var bytes = frame.Encode();
+
+        try
+        {
+            await ws.SendAsync(bytes, WebSocketMessageType.Binary, true, CancellationToken.None);
+        }
+        catch
+        {
+            // 发送失败，忽略（可能连接已断开）
+        }
+    }
+
+    /// <summary>
+    /// 发送下行音频帧（同步版本，用于高频调用）
+    /// </summary>
+    public void SendDownlinkFrame(byte[] pcmPayload, uint timestampSamples = 0)
+    {
+        _ = SendDownlinkFrameAsync(pcmPayload, timestampSamples);
     }
 }
 
