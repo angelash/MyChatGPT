@@ -1,5 +1,6 @@
 package com.audiobridge.client.abp
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 sealed interface AbpControlMessage {
@@ -15,10 +16,14 @@ data class HelloMessage(
 ) : AbpControlMessage {
     override val type: String = "hello"
     override fun toJson(): String {
+        val codecArr = JSONArray().apply { cap.codec.forEach { put(it) } }
+        val sampleRateArr = JSONArray().apply { cap.sampleRate.forEach { put(it) } }
+        val frameMsArr = JSONArray().apply { cap.frameMs.forEach { put(it) } }
+        
         val capObj = JSONObject()
-            .put("codec", cap.codec.toList())
-            .put("sampleRate", cap.sampleRate.toList())
-            .put("frameMs", cap.frameMs.toList())
+            .put("codec", codecArr)
+            .put("sampleRate", sampleRateArr)
+            .put("frameMs", frameMsArr)
             .put("uplink", cap.uplink)
             .put("downlink", cap.downlink)
 
