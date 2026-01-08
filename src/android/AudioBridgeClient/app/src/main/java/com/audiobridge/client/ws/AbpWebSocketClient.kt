@@ -17,6 +17,8 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import java.util.Timer
+import java.util.TimerTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -57,6 +59,10 @@ class AbpWebSocketClient(
 
     // 上行序列号
     private val uplinkSeq = AtomicLong(0)
+    
+    // 心跳定时器
+    private var heartbeatTimer: Timer? = null
+    private var heartbeatIntervalMs: Long = 5000 // 默认 5 秒
 
     val isConnected: Boolean get() = state == State.CONNECTED
 
@@ -119,9 +125,15 @@ class AbpWebSocketClient(
                         when (msg) {
                             is WelcomeMessage -> {
                                 Log.i(TAG, "Received Welcome: sessionId=${msg.sessionId}")
+                                // 从 Welcome 消息获取心跳间隔并启动心跳
+                                heartbeatIntervalMs = msg.server.heartbeatMs.toLong()
+                                startHeartbeat()
                                 callbacks.onWelcome(msg)
                             }
-                            is PongMessage -> callbacks.onControlMessage(msg)
+                            is PongMessage -> {
+                                Log.d(TAG, "Received Pong: t=${msg.t}")
+                                callbacks.onControlMessage(msg)
+                            }
                             else -> callbacks.onControlMessage(msg)
                         }
                     } catch (e: Exception) {
@@ -155,6 +167,7 @@ class AbpWebSocketClient(
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.e(TAG, "onFailure: ${t.message}, response=${response?.code}", t)
+                    stopHeartbeat()
                     callbacks.onError("WS failure: ${t.message}")
                     callbacks.onLog("WS response: ${response?.code}")
                     setState(State.DISCONNECTED, callbacks)
@@ -164,10 +177,12 @@ class AbpWebSocketClient(
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "onClosing: code=$code, reason=$reason")
+                    stopHeartbeat()
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "onClosed: code=$code, reason=$reason")
+                    stopHeartbeat()
                     callbacks.onLog("WS closed: $code $reason")
                     setState(State.DISCONNECTED, callbacks)
                     currentCallbacks = null
@@ -180,10 +195,33 @@ class AbpWebSocketClient(
 
     fun disconnect() {
         Log.i(TAG, "disconnect() called")
+        stopHeartbeat()
         ws?.close(1000, "bye")
         ws = null
         currentCallbacks?.let { setState(State.DISCONNECTED, it) }
         currentCallbacks = null
+    }
+    
+    private fun startHeartbeat() {
+        stopHeartbeat()
+        Log.i(TAG, "Starting heartbeat timer, interval=${heartbeatIntervalMs}ms")
+        heartbeatTimer = Timer("ABP-Heartbeat", true).apply {
+            scheduleAtFixedRate(object : TimerTask() {
+                override fun run() {
+                    try {
+                        sendPing()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Heartbeat ping failed", e)
+                    }
+                }
+            }, heartbeatIntervalMs, heartbeatIntervalMs)
+        }
+    }
+    
+    private fun stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = null
+        Log.i(TAG, "Heartbeat timer stopped")
     }
 
     /**
@@ -211,7 +249,9 @@ class AbpWebSocketClient(
         if (state != State.CONNECTED) return
 
         val ping = PingMessage(t = System.currentTimeMillis())
-        socket.send(ping.toJson())
+        val json = ping.toJson()
+        Log.d(TAG, "Sending ping: $json")
+        socket.send(json)
     }
 
     /**

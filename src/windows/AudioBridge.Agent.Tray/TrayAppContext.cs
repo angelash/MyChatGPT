@@ -1,5 +1,6 @@
 using System.Drawing;
 using AudioBridge.Core.Audio;
+using AudioBridge.Core.Logging;
 using AudioBridge.Transport.Server;
 
 namespace AudioBridge.Agent.Tray;
@@ -9,18 +10,23 @@ internal sealed class TrayAppContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _startMenuItem;
     private readonly ToolStripMenuItem _stopMenuItem;
+    private readonly FileLogger _logger;
+    private readonly StatusForm _statusForm;
     private TrayState _state = TrayState.Stopped;
     private AbpWebSocketServer? _server;
     private AudioBridgeService? _audioService;
 
     public TrayAppContext()
     {
+        _logger = FileLogger.Instance;
+        _logger.Info("TrayApp", "AudioBridge 托盘应用启动");
+
         _startMenuItem = new ToolStripMenuItem("Start", null, (_, _) => Start());
         _stopMenuItem = new ToolStripMenuItem("Stop", null, (_, _) => Stop()) { Enabled = false };
 
         var showStatusItem = new ToolStripMenuItem("Show Status", null, (_, _) => ShowStatus());
         var showDevicesItem = new ToolStripMenuItem("Show Devices", null, (_, _) => ShowDevices());
-        var openDocsItem = new ToolStripMenuItem("Open Docs", null, (_, _) => OpenDocs());
+        var openLogItem = new ToolStripMenuItem("Open Log File", null, (_, _) => OpenLogFile());
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitApp());
 
         var menu = new ContextMenuStrip();
@@ -29,7 +35,7 @@ internal sealed class TrayAppContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(showStatusItem);
         menu.Items.Add(showDevicesItem);
-        menu.Items.Add(openDocsItem);
+        menu.Items.Add(openLogItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
@@ -43,6 +49,14 @@ internal sealed class TrayAppContext : ApplicationContext
 
         _notifyIcon.DoubleClick += (_, _) => ShowStatus();
 
+        // 创建状态窗口
+        _statusForm = new StatusForm();
+        _statusForm.SetDataSources(
+            () => _server,
+            () => _audioService,
+            () => _state.ToString()
+        );
+
         UpdateUiForState();
     }
 
@@ -50,6 +64,7 @@ internal sealed class TrayAppContext : ApplicationContext
     {
         if (disposing)
         {
+            _logger.Info("TrayApp", "正在关闭...");
             try
             {
                 _server?.StopAsync().GetAwaiter().GetResult();
@@ -59,8 +74,10 @@ internal sealed class TrayAppContext : ApplicationContext
                 // ignore
             }
 
+            _statusForm.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
+            _logger.Dispose();
         }
 
         base.Dispose(disposing);
@@ -78,33 +95,8 @@ internal sealed class TrayAppContext : ApplicationContext
 
     private void ShowStatus()
     {
-        // MVP：先弹一个简易对话框；后续替换为独立 StatusWindow（WP-UI1）
-        var audioStatus = _audioService?.GetStatus();
-        var statusText = $"状态：{_state}\n";
-
-        // WebSocket 服务器状态
-        if (_server != null)
-        {
-            statusText += $"\nWebSocket 服务器：{(_server.IsRunning ? "运行中" : "已停止")}\n";
-            statusText += $"  - 端口：{_server.Port}\n";
-            statusText += $"  - Android 连接：{(_server.HasActiveSession ? "✓ 已连接" : "✗ 未连接")}\n";
-            statusText += $"  - 下行帧（发→手机）：{_server.DownlinkFramesSent}\n";
-            statusText += $"  - 上行帧（收←手机）：{_server.UplinkFramesReceived}\n";
-        }
-
-        if (audioStatus != null)
-        {
-            statusText += $"\n音频桥接：{(audioStatus.IsRunning ? "运行中" : "已停止")}\n";
-            statusText += $"  - Loopback 捕获：{(audioStatus.IsLoopbackCapturing ? "✓" : "✗")}\n";
-            statusText += $"  - 虚拟麦克风：{(audioStatus.IsVirtualMicRendering ? "✓" : "✗")}\n";
-            statusText += $"  - 缓冲：{audioStatus.VirtualMicBufferedMs}ms\n";
-            statusText += $"  - 欠载次数：{audioStatus.VirtualMicUnderrunCount}\n";
-            statusText += $"  - 已写入帧（上行→虚拟麦）：{audioStatus.VirtualMicFramesWritten}\n";
-        }
-
-        statusText += "\n提示：v1 默认建议戴耳机使用（避免自激）。";
-
-        MessageBox.Show(statusText, "AudioBridge Status", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        _statusForm.Show();
+        _statusForm.BringToFront();
     }
 
     private void ShowDevices()
@@ -136,26 +128,19 @@ internal sealed class TrayAppContext : ApplicationContext
         MessageBox.Show(sb.ToString(), "AudioBridge Devices", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
-    private void OpenDocs()
+    private void OpenLogFile()
     {
         try
         {
-            var docsPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "docs"));
-            if (!Directory.Exists(docsPath))
-            {
-                MessageBox.Show("未找到 docs 目录。", "AudioBridge", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = docsPath,
+                FileName = _logger.GetLogFilePath(),
                 UseShellExecute = true,
             });
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"打开 docs 失败：{ex.Message}", "AudioBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show($"打开日志文件失败：{ex.Message}", "AudioBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -167,31 +152,37 @@ internal sealed class TrayAppContext : ApplicationContext
 
     private async Task StartAsync()
     {
+        _logger.Info("TrayApp", "正在启动服务...");
         try
         {
             // 1. 启动音频桥接服务
             _audioService ??= new AudioBridgeService();
             _audioService.Error += OnAudioError;
             _audioService.Start();
+            _logger.Info("Audio", $"音频服务已启动，IsRunning={_audioService.IsRunning}");
 
             if (!_audioService.IsRunning)
             {
+                _logger.Error("Audio", "音频服务启动失败");
                 _state = TrayState.Error;
                 UpdateUiForState();
                 return;
             }
 
             // 2. 启动 WebSocket 服务器
-            // TODO: 从 settings.json 读取端口/token；目前先硬编码默认端口
             _server ??= new AbpWebSocketServer(port: 21347, token: null);
+            _server.OnLog = (level, msg) => _logger.Log(level, "WebSocket", msg);
 
             // 连接音频流：下行帧（系统声）-> 发送给 Android
             _audioService.DownlinkFrameAvailable += OnDownlinkFrame;
 
             // 连接音频流：上行帧（Android 麦克风）-> 写入虚拟麦克风
             _server.UplinkFrameReceived += OnUplinkFrame;
+            _server.SessionConnected += OnSessionConnected;
+            _server.SessionDisconnected += OnSessionDisconnected;
 
             await _server.StartAsync();
+            _logger.Info("WebSocket", $"WebSocket 服务器已启动，端口={_server.Port}");
 
             _state = TrayState.Listening;
             UpdateUiForState();
@@ -199,6 +190,7 @@ internal sealed class TrayAppContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            _logger.Error("TrayApp", $"启动失败：{ex}");
             _state = TrayState.Error;
             UpdateUiForState();
             _notifyIcon.ShowBalloonTip(2000, "AudioBridge", $"启动失败：{ex.Message}", ToolTipIcon.Error);
@@ -207,13 +199,17 @@ internal sealed class TrayAppContext : ApplicationContext
 
     private async Task StopAsync()
     {
+        _logger.Info("TrayApp", "正在停止服务...");
         try
         {
             // 1. 停止 WebSocket 服务器
             if (_server is not null)
             {
                 _server.UplinkFrameReceived -= OnUplinkFrame;
+                _server.SessionConnected -= OnSessionConnected;
+                _server.SessionDisconnected -= OnSessionDisconnected;
                 await _server.StopAsync();
+                _logger.Info("WebSocket", "WebSocket 服务器已停止");
             }
 
             // 2. 停止音频桥接服务
@@ -222,6 +218,7 @@ internal sealed class TrayAppContext : ApplicationContext
                 _audioService.DownlinkFrameAvailable -= OnDownlinkFrame;
                 _audioService.Error -= OnAudioError;
                 _audioService.Stop();
+                _logger.Info("Audio", "音频服务已停止");
             }
 
             _state = TrayState.Stopped;
@@ -230,6 +227,7 @@ internal sealed class TrayAppContext : ApplicationContext
         }
         catch (Exception ex)
         {
+            _logger.Error("TrayApp", $"停止失败：{ex}");
             _state = TrayState.Error;
             UpdateUiForState();
             _notifyIcon.ShowBalloonTip(2000, "AudioBridge", $"停止失败：{ex.Message}", ToolTipIcon.Error);
@@ -248,8 +246,25 @@ internal sealed class TrayAppContext : ApplicationContext
         _audioService?.WriteUplinkFrame(pcmFrame);
     }
 
+    private void OnSessionConnected(string deviceId)
+    {
+        _logger.Info("WebSocket", $"客户端已连接：{deviceId}");
+        _state = TrayState.Connected;
+        UpdateUiForState();
+        _notifyIcon.ShowBalloonTip(1500, "AudioBridge", $"客户端已连接：{deviceId}", ToolTipIcon.Info);
+    }
+
+    private void OnSessionDisconnected(string deviceId, string reason)
+    {
+        _logger.Info("WebSocket", $"客户端已断开：{deviceId}，原因：{reason}");
+        _state = TrayState.Listening;
+        UpdateUiForState();
+        _notifyIcon.ShowBalloonTip(1500, "AudioBridge", $"客户端已断开：{reason}", ToolTipIcon.Warning);
+    }
+
     private void OnAudioError(string source, Exception? ex)
     {
+        _logger.Error("Audio", $"[{source}] {ex?.Message ?? "未知错误"}");
         _notifyIcon.ShowBalloonTip(2000, "AudioBridge", $"音频错误 [{source}]: {ex?.Message ?? "未知错误"}", ToolTipIcon.Warning);
     }
 
@@ -262,7 +277,6 @@ internal sealed class TrayAppContext : ApplicationContext
 
     private string BuildTooltip()
     {
-        // Tooltip 不能太长（Windows 限制），先放最小信息
         return _state switch
         {
             TrayState.Stopped => "AudioBridge: Stopped",
@@ -283,4 +297,3 @@ internal sealed class TrayAppContext : ApplicationContext
         Error,
     }
 }
-

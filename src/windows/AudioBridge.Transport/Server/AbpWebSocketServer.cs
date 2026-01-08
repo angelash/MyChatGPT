@@ -12,7 +12,6 @@ namespace AudioBridge.Transport.Server;
 
 /// <summary>
 /// v1 WebSocket 单连接承载：控制(JSON text) + 音频帧(binary)。
-/// 目前实现到：hello/welcome、ping/pong、binary frame 解码 + 音频转发。
 /// </summary>
 public sealed class AbpWebSocketServer : IAsyncDisposable
 {
@@ -20,9 +19,15 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     private readonly string? _token;
     private WebApplication? _app;
     private WebSocket? _activeSession;
+    private string? _activeDeviceId;
     private uint _downlinkSeq;
     private long _downlinkFramesSent;
     private long _uplinkFramesReceived;
+    private long _pingCount;
+    private DateTime _lastPingTime;
+
+    /// <summary>日志回调（可选）</summary>
+    public Action<string, string>? OnLog { get; set; }
 
     public AbpWebSocketServer(int port, string? token = null)
     {
@@ -37,11 +42,21 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     public bool HasActiveSession => _activeSession?.State == WebSocketState.Open;
     public long DownlinkFramesSent => _downlinkFramesSent;
     public long UplinkFramesReceived => _uplinkFramesReceived;
+    public long PingCount => _pingCount;
 
-    /// <summary>
-    /// 当收到上行音频帧（从 Android 麦克风）时触发
-    /// </summary>
+    /// <summary>当收到上行音频帧（从 Android 麦克风）时触发</summary>
     public event Action<byte[]>? UplinkFrameReceived;
+
+    /// <summary>当客户端连接成功时触发</summary>
+    public event Action<string>? SessionConnected;
+
+    /// <summary>当客户端断开时触发</summary>
+    public event Action<string, string>? SessionDisconnected;
+
+    private void Log(string level, string message)
+    {
+        OnLog?.Invoke(level, message);
+    }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -67,7 +82,8 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
             service = "AudioBridge",
             status = "running",
             wsEndpoint = "/abp",
-            port = _port
+            port = _port,
+            hasActiveSession = HasActiveSession,
         }));
 
         app.Map("/abp", async context =>
@@ -79,12 +95,15 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                 return;
             }
 
+            Log("INFO", $"WebSocket 连接请求来自 {context.Connection.RemoteIpAddress}");
+
             using var ws = await context.WebSockets.AcceptWebSocketAsync();
             await HandleSessionAsync(ws, app.Logger, cancellationToken);
         });
 
         await app.StartAsync(cancellationToken);
         _app = app;
+        Log("INFO", $"WebSocket 服务器已启动，端口 {_port}");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -94,6 +113,7 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
             return;
         }
 
+        Log("INFO", "正在停止 WebSocket 服务器...");
         await _app.StopAsync(cancellationToken);
         await _app.DisposeAsync();
         _app = null;
@@ -107,11 +127,23 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     private async Task HandleSessionAsync(WebSocket ws, ILogger logger, CancellationToken ct)
     {
         // v1: 单连接模式，后连接的会挤掉前一个
+        var oldSession = _activeSession;
         _activeSession = ws;
         _downlinkSeq = 0;
 
+        if (oldSession != null && oldSession.State == WebSocketState.Open)
+        {
+            Log("WARN", "新连接将挤掉旧连接");
+            try
+            {
+                await oldSession.CloseAsync(WebSocketCloseStatus.PolicyViolation, "replaced", CancellationToken.None);
+            }
+            catch { }
+        }
+
         var buffer = new byte[64 * 1024];
         HelloMessage? hello = null;
+        string disconnectReason = "unknown";
 
         try
         {
@@ -124,6 +156,8 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                     result = await ws.ReceiveAsync(buffer, ct);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
+                        disconnectReason = $"客户端主动关闭: {result.CloseStatus} - {result.CloseStatusDescription}";
+                        Log("INFO", disconnectReason);
                         return;
                     }
 
@@ -139,34 +173,48 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     var json = Encoding.UTF8.GetString(messageBytes);
+                    Log("DEBUG", $"收到文本消息: {json}");
+
                     var msg = AbpControlJson.Deserialize(json);
 
                     switch (msg)
                     {
                         case HelloMessage h:
                             hello = h;
+                            _activeDeviceId = h.DeviceId;
+                            Log("INFO", $"收到 Hello: DeviceId={h.DeviceId}");
+
                             if (!IsTokenOk(h.Token))
                             {
+                                Log("WARN", "Token 验证失败");
                                 await SendTextAsync(ws, AbpControlJson.Serialize(new ErrorMessage("AUTH_FAIL", "invalid token")), ct);
                                 await ws.CloseAsync(WebSocketCloseStatus.PolicyViolation, "AUTH_FAIL", ct);
+                                disconnectReason = "Token 验证失败";
                                 return;
                             }
 
-                            // v1：先固定选 PCM（后续可按 cap 选择 Opus）
+                            // v1：先固定选 PCM
                             var welcome = new WelcomeMessage(
                                 SessionId: Guid.NewGuid().ToString("N"),
                                 Selected: new SelectedConfig(Codec: "pcm", SampleRate: 48000, Channels: 1, FrameMs: 20),
                                 Server: new ServerConfig(HeartbeatMs: 5000));
 
                             await SendTextAsync(ws, AbpControlJson.Serialize(welcome), ct);
+                            Log("INFO", $"已发送 Welcome，SessionId={welcome.SessionId}");
+
+                            // 触发连接事件
+                            SessionConnected?.Invoke(h.DeviceId);
                             break;
 
                         case PingMessage ping:
+                            Interlocked.Increment(ref _pingCount);
+                            _lastPingTime = DateTime.Now;
                             await SendTextAsync(ws, AbpControlJson.Serialize(new PongMessage(ping.T)), ct);
+                            Log("DEBUG", $"Ping/Pong: t={ping.T}");
                             break;
 
                         default:
-                            // 其他控制消息 v1 先忽略（ptt/mute 等）
+                            Log("DEBUG", $"收到其他控制消息: {msg?.GetType().Name}");
                             break;
                     }
                 }
@@ -174,7 +222,7 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                 {
                     if (!AbpBinaryFrame.TryDecode(messageBytes, out var frame, out var error))
                     {
-                        logger.LogWarning("Bad binary frame: {Error}", error);
+                        Log("WARN", $"二进制帧解码失败: {error}");
                         continue;
                     }
 
@@ -184,28 +232,32 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                         Interlocked.Increment(ref _uplinkFramesReceived);
                         UplinkFrameReceived?.Invoke(frame.Payload.ToArray());
                     }
-
-                    _ = hello; // placeholder for future session binding
                 }
             }
+
+            disconnectReason = $"WebSocket 状态变为 {ws.State}";
         }
         catch (OperationCanceledException)
         {
-            // ignore
+            disconnectReason = "操作被取消";
         }
         catch (WebSocketException ex)
         {
-            logger.LogInformation(ex, "WebSocket session ended");
+            disconnectReason = $"WebSocket 异常: {ex.Message}";
+            Log("WARN", disconnectReason);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "WebSocket session error");
+            disconnectReason = $"未知异常: {ex.Message}";
+            Log("ERROR", $"会话异常: {ex}");
         }
         finally
         {
+            var deviceId = _activeDeviceId ?? "unknown";
             if (_activeSession == ws)
             {
                 _activeSession = null;
+                _activeDeviceId = null;
             }
 
             if (ws.State == WebSocketState.Open)
@@ -214,11 +266,11 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                 {
                     await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
                 }
-                catch
-                {
-                    // ignore
-                }
+                catch { }
             }
+
+            Log("INFO", $"会话结束: {deviceId}, 原因: {disconnectReason}");
+            SessionDisconnected?.Invoke(deviceId, disconnectReason);
         }
     }
 
@@ -258,9 +310,9 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
             await ws.SendAsync(bytes, WebSocketMessageType.Binary, true, CancellationToken.None);
             Interlocked.Increment(ref _downlinkFramesSent);
         }
-        catch
+        catch (Exception ex)
         {
-            // 发送失败，忽略（可能连接已断开）
+            Log("WARN", $"发送下行帧失败: {ex.Message}");
         }
     }
 
@@ -272,4 +324,3 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
         _ = SendDownlinkFrameAsync(pcmPayload, timestampSamples);
     }
 }
-
