@@ -21,6 +21,8 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     private WebApplication? _app;
     private WebSocket? _activeSession;
     private uint _downlinkSeq;
+    private long _downlinkFramesSent;
+    private long _uplinkFramesReceived;
 
     public AbpWebSocketServer(int port, string? token = null)
     {
@@ -32,6 +34,9 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     public string? Token => _token;
 
     public bool IsRunning => _app is not null;
+    public bool HasActiveSession => _activeSession?.State == WebSocketState.Open;
+    public long DownlinkFramesSent => _downlinkFramesSent;
+    public long UplinkFramesReceived => _uplinkFramesReceived;
 
     /// <summary>
     /// 当收到上行音频帧（从 Android 麦克风）时触发
@@ -176,6 +181,7 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                     // 上行音频帧（从 Android 麦克风）
                     if (frame.StreamId == AbpStreamId.Uplink)
                     {
+                        Interlocked.Increment(ref _uplinkFramesReceived);
                         UplinkFrameReceived?.Invoke(frame.Payload.ToArray());
                     }
 
@@ -250,6 +256,7 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
         try
         {
             await ws.SendAsync(bytes, WebSocketMessageType.Binary, true, CancellationToken.None);
+            Interlocked.Increment(ref _downlinkFramesSent);
         }
         catch
         {

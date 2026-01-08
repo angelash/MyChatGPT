@@ -82,6 +82,16 @@ internal sealed class TrayAppContext : ApplicationContext
         var audioStatus = _audioService?.GetStatus();
         var statusText = $"状态：{_state}\n";
 
+        // WebSocket 服务器状态
+        if (_server != null)
+        {
+            statusText += $"\nWebSocket 服务器：{(_server.IsRunning ? "运行中" : "已停止")}\n";
+            statusText += $"  - 端口：{_server.Port}\n";
+            statusText += $"  - Android 连接：{(_server.HasActiveSession ? "✓ 已连接" : "✗ 未连接")}\n";
+            statusText += $"  - 下行帧（发→手机）：{_server.DownlinkFramesSent}\n";
+            statusText += $"  - 上行帧（收←手机）：{_server.UplinkFramesReceived}\n";
+        }
+
         if (audioStatus != null)
         {
             statusText += $"\n音频桥接：{(audioStatus.IsRunning ? "运行中" : "已停止")}\n";
@@ -89,7 +99,7 @@ internal sealed class TrayAppContext : ApplicationContext
             statusText += $"  - 虚拟麦克风：{(audioStatus.IsVirtualMicRendering ? "✓" : "✗")}\n";
             statusText += $"  - 缓冲：{audioStatus.VirtualMicBufferedMs}ms\n";
             statusText += $"  - 欠载次数：{audioStatus.VirtualMicUnderrunCount}\n";
-            statusText += $"  - 已写入帧：{audioStatus.VirtualMicFramesWritten}\n";
+            statusText += $"  - 已写入帧（上行→虚拟麦）：{audioStatus.VirtualMicFramesWritten}\n";
         }
 
         statusText += "\n提示：v1 默认建议戴耳机使用（避免自激）。";
