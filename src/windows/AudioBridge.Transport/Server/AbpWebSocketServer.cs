@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using AudioBridge.Transport.Control;
+using AudioBridge.Transport.Audio;
 using AudioBridge.Transport.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -23,8 +24,14 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     private uint _downlinkSeq;
     private long _downlinkFramesSent;
     private long _uplinkFramesReceived;
+    private long _downlinkPayloadBytesSent;
+    private long _uplinkPayloadBytesReceived;
+    private long _downlinkFramesSuppressed;
     private long _pingCount;
     private DateTime _lastPingTime;
+    private bool _handshakeDone;
+    private string _selectedCodec = "pcm";
+    private readonly Pcm16SilenceGate _downlinkSilenceGate = new(thresholdAvgAbs: 120, minSilentFramesToSuppress: 10);
 
     /// <summary>日志回调（可选）</summary>
     public Action<string, string>? OnLog { get; set; }
@@ -42,7 +49,12 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     public bool HasActiveSession => _activeSession?.State == WebSocketState.Open;
     public long DownlinkFramesSent => _downlinkFramesSent;
     public long UplinkFramesReceived => _uplinkFramesReceived;
+    public long DownlinkPayloadBytesSent => _downlinkPayloadBytesSent;
+    public long UplinkPayloadBytesReceived => _uplinkPayloadBytesReceived;
+    public long DownlinkFramesSuppressed => _downlinkFramesSuppressed;
     public long PingCount => _pingCount;
+    public string SelectedCodec => _selectedCodec;
+    public bool HandshakeDone => _handshakeDone;
 
     /// <summary>当收到上行音频帧（从 Android 麦克风）时触发</summary>
     public event Action<byte[]>? UplinkFrameReceived;
@@ -130,6 +142,9 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
         var oldSession = _activeSession;
         _activeSession = ws;
         _downlinkSeq = 0;
+        _handshakeDone = false;
+        _selectedCodec = "pcm";
+        _downlinkSilenceGate.Reset();
 
         if (oldSession != null && oldSession.State == WebSocketState.Open)
         {
@@ -193,14 +208,17 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                                 return;
                             }
 
-                            // v1：先固定选 PCM
+                            // v1：根据客户端能力协商 codec（优先 adpcm，其次 pcm）
+                            _selectedCodec = SelectCodec(h.Cap.Codec);
+
                             var welcome = new WelcomeMessage(
                                 SessionId: Guid.NewGuid().ToString("N"),
-                                Selected: new SelectedConfig(Codec: "pcm", SampleRate: 48000, Channels: 1, FrameMs: 20),
+                                Selected: new SelectedConfig(Codec: _selectedCodec, SampleRate: 48000, Channels: 1, FrameMs: 20),
                                 Server: new ServerConfig(HeartbeatMs: 5000));
 
                             await SendTextAsync(ws, AbpControlJson.Serialize(welcome), ct);
                             Log("INFO", $"已发送 Welcome，SessionId={welcome.SessionId}");
+                            _handshakeDone = true;
 
                             // 触发连接事件
                             SessionConnected?.Invoke(h.DeviceId);
@@ -220,7 +238,7 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                 }
                 else if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    if (!AbpBinaryFrame.TryDecode(messageBytes, out var frame, out var error))
+                    if (!AbpBinaryFrame.TryDecode(messageBytes, out var frame, out var error) || frame is null)
                     {
                         Log("WARN", $"二进制帧解码失败: {error}");
                         continue;
@@ -230,7 +248,16 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
                     if (frame.StreamId == AbpStreamId.Uplink)
                     {
                         Interlocked.Increment(ref _uplinkFramesReceived);
-                        UplinkFrameReceived?.Invoke(frame.Payload.ToArray());
+                        Interlocked.Add(ref _uplinkPayloadBytesReceived, frame.Payload.Length);
+
+                        // 在握手完成前不处理音频（防止 codec 未确定导致乱解码）
+                        if (!_handshakeDone)
+                        {
+                            continue;
+                        }
+
+                        var pcm = DecodeUplinkToPcm(frame.Payload);
+                        UplinkFrameReceived?.Invoke(pcm);
                     }
                 }
             }
@@ -301,14 +328,30 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
             return;
         }
 
+        // 在握手完成前不发送音频（防止客户端未拿到 selected codec）
+        if (!_handshakeDone)
+        {
+            return;
+        }
+
+        // 省流：静音连续一段时间后停止发送（基于 PCM 能量）
+        if (!_downlinkSilenceGate.ShouldSend(pcmPayload))
+        {
+            Interlocked.Increment(ref _downlinkFramesSuppressed);
+            return;
+        }
+
+        var payload = EncodeDownlinkPayload(pcmPayload);
+
         var seq = Interlocked.Increment(ref _downlinkSeq);
-        var frame = new AbpBinaryFrame(AbpStreamId.Downlink, seq, timestampSamples, pcmPayload);
+        var frame = new AbpBinaryFrame(AbpStreamId.Downlink, seq, timestampSamples, payload);
         var bytes = frame.Encode();
 
         try
         {
             await ws.SendAsync(bytes, WebSocketMessageType.Binary, true, CancellationToken.None);
             Interlocked.Increment(ref _downlinkFramesSent);
+            Interlocked.Add(ref _downlinkPayloadBytesSent, payload.Length);
         }
         catch (Exception ex)
         {
@@ -322,5 +365,52 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     public void SendDownlinkFrame(byte[] pcmPayload, uint timestampSamples = 0)
     {
         _ = SendDownlinkFrameAsync(pcmPayload, timestampSamples);
+    }
+
+    private static string SelectCodec(string[]? clientCodecs)
+    {
+        if (clientCodecs is null || clientCodecs.Length == 0)
+        {
+            return "pcm";
+        }
+
+        // 简单优先级：adpcm > pcm
+        foreach (var c in clientCodecs)
+        {
+            if (string.Equals(c, "adpcm", StringComparison.OrdinalIgnoreCase))
+            {
+                return "adpcm";
+            }
+        }
+
+        foreach (var c in clientCodecs)
+        {
+            if (string.Equals(c, "pcm", StringComparison.OrdinalIgnoreCase))
+            {
+                return "pcm";
+            }
+        }
+
+        return "pcm";
+    }
+
+    private byte[] EncodeDownlinkPayload(byte[] pcmPayload)
+    {
+        if (string.Equals(_selectedCodec, "adpcm", StringComparison.OrdinalIgnoreCase))
+        {
+            return ImaAdpcm.EncodePcm16Mono(pcmPayload, AbpAudioFormat.SamplesPerFrame);
+        }
+
+        return pcmPayload;
+    }
+
+    private byte[] DecodeUplinkToPcm(byte[] payload)
+    {
+        if (string.Equals(_selectedCodec, "adpcm", StringComparison.OrdinalIgnoreCase))
+        {
+            return ImaAdpcm.DecodeToPcm16Mono(payload, AbpAudioFormat.SamplesPerFrame);
+        }
+
+        return payload;
     }
 }

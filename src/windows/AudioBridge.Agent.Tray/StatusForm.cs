@@ -215,7 +215,8 @@ public class StatusForm : Form
         {
             var wsRunning = server.IsRunning ? "✓ 运行中" : "✗ 已停止";
             var wsConnected = server.HasActiveSession ? "✓ 已连接" : "✗ 未连接";
-            _wsStatusLabel.Text = $"WebSocket：{wsRunning} | 端口 {server.Port} | Android {wsConnected}";
+            var codec = server.HandshakeDone ? server.SelectedCodec : "(handshake...)";
+            _wsStatusLabel.Text = $"WebSocket：{wsRunning} | 端口 {server.Port} | Android {wsConnected} | codec {codec}";
             _wsStatusLabel.ForeColor = server.HasActiveSession ? Color.LightGreen : Color.LightGray;
         }
         else
@@ -236,7 +237,11 @@ public class StatusForm : Form
             // 统计
             var downlink = server?.DownlinkFramesSent ?? 0;
             var uplink = server?.UplinkFramesReceived ?? 0;
-            _statsLabel.Text = $"统计：↓发送 {downlink} 帧 | ↑接收 {uplink} 帧 | 写入虚拟麦 {audioStatus.VirtualMicFramesWritten} 帧 | 欠载 {audioStatus.VirtualMicUnderrunCount}";
+            var downBytes = server?.DownlinkPayloadBytesSent ?? 0;
+            var upBytes = server?.UplinkPayloadBytesReceived ?? 0;
+            var downSupp = server?.DownlinkFramesSuppressed ?? 0;
+            _statsLabel.Text =
+                $"统计：↓发送 {downlink} 帧({FormatBytes(downBytes)}) | ↓静音丢弃 {downSupp} 帧 | ↑接收 {uplink} 帧({FormatBytes(upBytes)}) | 写入虚拟麦 {audioStatus.VirtualMicFramesWritten} 帧 | 欠载 {audioStatus.VirtualMicUnderrunCount}";
         }
         else
         {
@@ -244,6 +249,15 @@ public class StatusForm : Form
             _audioStatusLabel.ForeColor = Color.Gray;
             _statsLabel.Text = "统计：-";
         }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 0) return "-";
+        if (bytes < 1024) return $"{bytes}B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024d:0.0}KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024d * 1024):0.0}MB";
+        return $"{bytes / (1024d * 1024 * 1024):0.00}GB";
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

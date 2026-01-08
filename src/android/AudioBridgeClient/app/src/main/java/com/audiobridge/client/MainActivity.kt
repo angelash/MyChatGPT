@@ -177,12 +177,25 @@ class MainActivity : AppCompatActivity() {
             appendLine("音频状态：")
             appendLine("  麦克风：${if (audioManager.isCaptureRunning) "✓" else "✗"}")
             appendLine("  播放器：${if (audioManager.isPlayerRunning) "✓" else "✗"}")
-            appendLine("  上行帧：${audioManager.uplinkFrames}")
-            appendLine("  下行帧：${audioManager.downlinkFrames}")
+            appendLine("  协商 codec：${wsClient.selectedCodec}")
+            appendLine("  上行捕获帧：${audioManager.uplinkFrames}")
+            appendLine("  上行发送帧：${wsClient.uplinkFramesSentCount}（静音丢弃 ${wsClient.uplinkFramesSuppressedCount}）")
+            appendLine("  上行发送字节：${formatBytes(wsClient.uplinkPayloadBytesSentCount)}")
+            appendLine("  下行播放帧：${audioManager.downlinkFrames}")
+            appendLine("  下行接收帧：${wsClient.downlinkFramesReceivedCount}")
+            appendLine("  下行接收字节：${formatBytes(wsClient.downlinkPayloadBytesReceivedCount)}")
             appendLine("  播放缓冲：${audioManager.playerBufferedMs}ms")
             appendLine("  欠载：${audioManager.playerUnderrunCount}")
         }
         audioStatusText.text = status
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 0) return "-"
+        if (bytes < 1024) return "${bytes}B"
+        if (bytes < 1024 * 1024) return String.format("%.1fKB", bytes / 1024.0)
+        if (bytes < 1024L * 1024 * 1024) return String.format("%.1fMB", bytes / (1024.0 * 1024.0))
+        return String.format("%.2fGB", bytes / (1024.0 * 1024.0 * 1024.0))
     }
 
     private fun hasRecordAudioPermission(): Boolean {

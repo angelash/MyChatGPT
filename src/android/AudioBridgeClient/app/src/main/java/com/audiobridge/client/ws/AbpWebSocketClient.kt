@@ -5,11 +5,14 @@ import com.audiobridge.client.abp.AbpBinaryFrame
 import com.audiobridge.client.abp.AbpControlJson
 import com.audiobridge.client.abp.AbpControlMessage
 import com.audiobridge.client.abp.AbpStreamId
+import com.audiobridge.client.abp.ImaAdpcm
 import com.audiobridge.client.abp.HelloCapabilities
 import com.audiobridge.client.abp.HelloMessage
 import com.audiobridge.client.abp.PingMessage
 import com.audiobridge.client.abp.PongMessage
 import com.audiobridge.client.abp.WelcomeMessage
+import com.audiobridge.client.audio.AudioConfig
+import com.audiobridge.client.audio.Pcm16SilenceGate
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -57,14 +60,33 @@ class AbpWebSocketClient(
     private var state: State = State.DISCONNECTED
     private var currentCallbacks: Callbacks? = null
 
+    // 协商结果（Welcome.selected）
+    private var selectedCodecName: String = "pcm"
+
     // 上行序列号
     private val uplinkSeq = AtomicLong(0)
+
+    // 省流：上行静音门（VAD/DTX）
+    private val uplinkSilenceGate = Pcm16SilenceGate(thresholdAvgAbs = 120, minSilentFramesToSuppress = 10)
+
+    // 流量/帧统计（网络层：按“实际发送/接收”计）
+    private val uplinkFramesSent = AtomicLong(0)
+    private val uplinkFramesSuppressed = AtomicLong(0)
+    private val uplinkPayloadBytesSent = AtomicLong(0)
+    private val downlinkFramesReceived = AtomicLong(0)
+    private val downlinkPayloadBytesReceived = AtomicLong(0)
     
     // 心跳定时器
     private var heartbeatTimer: Timer? = null
     private var heartbeatIntervalMs: Long = 5000 // 默认 5 秒
 
     val isConnected: Boolean get() = state == State.CONNECTED
+    val selectedCodec: String get() = selectedCodecName
+    val uplinkFramesSentCount: Long get() = uplinkFramesSent.get()
+    val uplinkFramesSuppressedCount: Long get() = uplinkFramesSuppressed.get()
+    val uplinkPayloadBytesSentCount: Long get() = uplinkPayloadBytesSent.get()
+    val downlinkFramesReceivedCount: Long get() = downlinkFramesReceived.get()
+    val downlinkPayloadBytesReceivedCount: Long get() = downlinkPayloadBytesReceived.get()
 
     fun connect(
         host: String,
@@ -80,6 +102,13 @@ class AbpWebSocketClient(
         }
         setState(State.CONNECTING, callbacks)
         currentCallbacks = callbacks
+        selectedCodecName = "pcm"
+        uplinkSilenceGate.reset()
+        uplinkFramesSent.set(0)
+        uplinkFramesSuppressed.set(0)
+        uplinkPayloadBytesSent.set(0)
+        downlinkFramesReceived.set(0)
+        downlinkPayloadBytesReceived.set(0)
 
         // 智能构建 WebSocket URL
         val url = buildWebSocketUrl(host)
@@ -105,7 +134,8 @@ class AbpWebSocketClient(
                         deviceId = deviceId,
                         token = token?.takeIf { it.isNotBlank() },
                         cap = HelloCapabilities(
-                            codec = arrayOf("pcm"),
+                            // 优先申请 adpcm（4x 省流），兼容回退到 pcm
+                            codec = arrayOf("adpcm", "pcm"),
                             sampleRate = intArrayOf(48000),
                             frameMs = intArrayOf(20),
                             uplink = true,
@@ -127,6 +157,9 @@ class AbpWebSocketClient(
                                 Log.i(TAG, "Received Welcome: sessionId=${msg.sessionId}")
                                 // 从 Welcome 消息获取心跳间隔并启动心跳
                                 heartbeatIntervalMs = msg.server.heartbeatMs.toLong()
+                                // 记录协商出的 codec（用于音频帧编解码）
+                                selectedCodecName = msg.selected.codec
+                                uplinkSilenceGate.reset()
                                 startHeartbeat()
                                 callbacks.onWelcome(msg)
                             }
@@ -150,7 +183,11 @@ class AbpWebSocketClient(
                             when (frame.streamId) {
                                 AbpStreamId.DOWNLINK -> {
                                     // 下行音频：系统声音 -> Android 播放
-                                    callbacks.onDownlinkFrame(frame.payload)
+                                    downlinkFramesReceived.incrementAndGet()
+                                    downlinkPayloadBytesReceived.addAndGet(frame.payload.size.toLong())
+
+                                    val pcm = decodeToPcm(frame.payload)
+                                    callbacks.onDownlinkFrame(pcm)
                                 }
                                 AbpStreamId.UPLINK -> {
                                     // 上行音频回显？一般不会收到
@@ -200,6 +237,7 @@ class AbpWebSocketClient(
         ws = null
         currentCallbacks?.let { setState(State.DISCONNECTED, it) }
         currentCallbacks = null
+        uplinkSilenceGate.reset()
     }
     
     private fun startHeartbeat() {
@@ -231,14 +269,24 @@ class AbpWebSocketClient(
         val socket = ws ?: return
         if (state != State.CONNECTED) return
 
+        // 省流：静音连续一段时间后停止发送
+        if (!uplinkSilenceGate.shouldSend(pcmPayload)) {
+            uplinkFramesSuppressed.incrementAndGet()
+            return
+        }
+
+        val payloadToSend = encodeFromPcm(pcmPayload)
+
         val frame = AbpBinaryFrame(
             streamId = AbpStreamId.UPLINK,
             seq = uplinkSeq.incrementAndGet(),
             timestampSamples = timestampSamples,
-            payload = pcmPayload,
+            payload = payloadToSend,
         )
 
         socket.send(frame.encode().toByteString())
+        uplinkFramesSent.incrementAndGet()
+        uplinkPayloadBytesSent.addAndGet(payloadToSend.size.toLong())
     }
 
     /**
@@ -291,5 +339,21 @@ class AbpWebSocketClient(
         val result = "ws://$host/abp"
         Log.d(TAG, "buildWebSocketUrl: added ws://, result=$result")
         return result
+    }
+
+    private fun encodeFromPcm(pcmPayload: ByteArray): ByteArray {
+        return if (selectedCodecName.equals("adpcm", ignoreCase = true)) {
+            ImaAdpcm.encodePcm16Mono(pcmPayload, AudioConfig.SAMPLES_PER_FRAME)
+        } else {
+            pcmPayload
+        }
+    }
+
+    private fun decodeToPcm(payload: ByteArray): ByteArray {
+        return if (selectedCodecName.equals("adpcm", ignoreCase = true)) {
+            ImaAdpcm.decodeToPcm16Mono(payload, AudioConfig.SAMPLES_PER_FRAME)
+        } else {
+            payload
+        }
     }
 }
