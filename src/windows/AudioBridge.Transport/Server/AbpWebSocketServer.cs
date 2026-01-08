@@ -56,6 +56,15 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
             KeepAliveInterval = TimeSpan.FromSeconds(30),
         });
 
+        // 根路径：返回服务状态（方便浏览器测试）
+        app.MapGet("/", () => Results.Ok(new
+        {
+            service = "AudioBridge",
+            status = "running",
+            wsEndpoint = "/abp",
+            port = _port
+        }));
+
         app.Map("/abp", async context =>
         {
             if (!context.WebSockets.IsWebSocketRequest)
