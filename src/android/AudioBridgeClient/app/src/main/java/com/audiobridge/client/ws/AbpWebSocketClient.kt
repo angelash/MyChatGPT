@@ -60,7 +60,6 @@ class AbpWebSocketClient(
 
     fun connect(
         host: String,
-        port: Int,
         token: String?,
         deviceId: String,
         callbacks: Callbacks,
@@ -70,7 +69,7 @@ class AbpWebSocketClient(
         currentCallbacks = callbacks
 
         // 智能构建 WebSocket URL
-        val url = buildWebSocketUrl(host, port)
+        val url = buildWebSocketUrl(host)
         val request = Request.Builder().url(url).build()
 
         callbacks.onLog("Connecting $url ...")
@@ -203,27 +202,17 @@ class AbpWebSocketClient(
     /**
      * 智能构建 WebSocket URL
      * 支持：
-     * - 纯 IP/域名: "10.3.91.22" -> "ws://10.3.91.22:21347/abp"
-     * - 带端口的域名: "example.com:8080" -> "ws://example.com:8080/abp"
+     * - 纯域名: "example.com" -> "ws://example.com/abp"
+     * - IP:端口: "10.3.91.22:21347" -> "ws://10.3.91.22:21347/abp"
      * - 完整 URL: "ws://example.com/abp" -> 直接使用
-     * - 端口 80 时省略端口: port=80 -> "ws://example.com/abp"
      */
-    private fun buildWebSocketUrl(host: String, port: Int): String {
+    private fun buildWebSocketUrl(host: String): String {
         // 如果已经是完整 URL，直接返回
         if (host.startsWith("ws://") || host.startsWith("wss://")) {
             return if (host.endsWith("/abp")) host else "$host/abp"
         }
 
-        // 如果 host 中已包含端口（如 example.com:8080），不再拼接
-        if (host.contains(":")) {
-            return "ws://$host/abp"
-        }
-
-        // 端口 80 时省略
-        return if (port == 80) {
-            "ws://$host/abp"
-        } else {
-            "ws://$host:$port/abp"
-        }
+        // 否则添加 ws:// 前缀
+        return "ws://$host/abp"
     }
 }

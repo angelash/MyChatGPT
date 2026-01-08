@@ -23,7 +23,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var audioStatusText: TextView
     private lateinit var hostInput: EditText
-    private lateinit var portInput: EditText
     private lateinit var tokenInput: EditText
     private lateinit var connectButton: Button
     private lateinit var uplinkSwitch: Switch
@@ -41,7 +40,6 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         audioStatusText = findViewById(R.id.audioStatusText)
         hostInput = findViewById(R.id.hostInput)
-        portInput = findViewById(R.id.portInput)
         tokenInput = findViewById(R.id.tokenInput)
         connectButton = findViewById(R.id.connectButton)
         uplinkSwitch = findViewById(R.id.uplinkSwitch)
@@ -49,11 +47,6 @@ class MainActivity : AppCompatActivity() {
 
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
-        }
-
-        // 默认端口：与 Windows Agent 保持一致
-        if (portInput.text.isNullOrBlank()) {
-            portInput.setText("21347")
         }
 
         // 默认启用上下行
@@ -80,15 +73,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun connect() {
         val host = hostInput.text?.toString()?.trim().orEmpty()
-        val port = portInput.text?.toString()?.trim().orEmpty()
-        if (host.isBlank() || port.isBlank()) {
-            statusText.text = "请先填写 Host/Port"
-            return
-        }
-
-        val portInt = port.toIntOrNull()
-        if (portInt == null || portInt <= 0 || portInt > 65535) {
-            statusText.text = "端口不合法：$port"
+        if (host.isBlank()) {
+            statusText.text = "请填写服务器地址"
             return
         }
 
@@ -97,7 +83,6 @@ class MainActivity : AppCompatActivity() {
 
         wsClient.connect(
             host = host,
-            port = portInt,
             token = token,
             deviceId = deviceId,
             callbacks = object : AbpWebSocketClient.Callbacks {

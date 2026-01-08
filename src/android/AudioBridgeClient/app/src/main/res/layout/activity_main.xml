@@ -37,20 +37,10 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:hint="@string/hint_host"
+            android:hint="服务器地址 (域名或IP:端口)"
+            android:text="746678-owaj.iepose.cn"
             android:inputType="textUri"
             app:layout_constraintTop_toBottomOf="@id/statusText"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent" />
-
-        <EditText
-            android:id="@+id/portInput"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:hint="@string/hint_port"
-            android:inputType="number"
-            app:layout_constraintTop_toBottomOf="@id/hostInput"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
@@ -61,7 +51,7 @@
             android:layout_marginTop="12dp"
             android:hint="@string/hint_token"
             android:inputType="textPassword"
-            app:layout_constraintTop_toBottomOf="@id/portInput"
+            app:layout_constraintTop_toBottomOf="@id/hostInput"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
