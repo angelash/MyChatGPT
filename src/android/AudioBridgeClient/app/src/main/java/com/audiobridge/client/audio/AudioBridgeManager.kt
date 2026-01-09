@@ -16,6 +16,7 @@ class AudioBridgeManager {
     private val capture = AudioRecordCapture()
     private val player = AudioTrackPlayer()
     private val isRunning = AtomicBoolean(false)
+    private var tuningMode: AudioTuningMode = AudioTuningMode.ROBUST
 
     // 上行帧计数
     private val uplinkFrameCount = AtomicLong(0)
@@ -53,6 +54,12 @@ class AudioBridgeManager {
         isRunning.set(capture.isRunning || player.isRunning)
     }
 
+    fun setTuningMode(mode: AudioTuningMode) {
+        tuningMode = mode
+        capture.setTuningMode(mode)
+        player.setTuningMode(mode)
+    }
+
     /**
      * 启动音频桥接
      * @param enableUplink 是否启用上行（麦克风）
@@ -63,6 +70,9 @@ class AudioBridgeManager {
             Log.w(TAG, "Already running")
             return true
         }
+
+        // 确保当前调优模式已应用
+        setTuningMode(tuningMode)
 
         uplinkFrameCount.set(0)
         downlinkFrameCount.set(0)
@@ -129,6 +139,7 @@ class AudioBridgeManager {
             onError?.invoke("上行错误：$msg")
         }
         
+        capture.setTuningMode(tuningMode)
         val result = capture.start()
         refreshRunningFlag()
         Log.i(TAG, "动态启动麦克风：$result")
@@ -155,6 +166,7 @@ class AudioBridgeManager {
             onError?.invoke("下行错误：$msg")
         }
 
+        player.setTuningMode(tuningMode)
         val result = player.start()
         refreshRunningFlag()
         Log.i(TAG, "动态启动播放器：$result")

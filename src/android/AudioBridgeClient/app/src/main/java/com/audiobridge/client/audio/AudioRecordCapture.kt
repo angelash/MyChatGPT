@@ -21,6 +21,7 @@ class AudioRecordCapture {
     private var audioRecord: AudioRecord? = null
     private val isCapturing = AtomicBoolean(false)
     private var captureThread: Thread? = null
+    private var tuningMode: AudioTuningMode = AudioTuningMode.ROBUST
 
     /** 当收到完整的 20ms PCM 帧时触发 */
     var onFrameAvailable: ((ByteArray) -> Unit)? = null
@@ -30,6 +31,10 @@ class AudioRecordCapture {
 
     /** 是否正在捕获 */
     val isRunning: Boolean get() = isCapturing.get()
+
+    fun setTuningMode(mode: AudioTuningMode) {
+        tuningMode = mode
+    }
 
     /**
      * 开始捕获
@@ -54,7 +59,8 @@ class AudioRecordCapture {
         }
 
         // 使用较大的缓冲区以避免溢出
-        val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * 4)
+        val multiplier = if (tuningMode == AudioTuningMode.ROBUST) 6 else 4
+        val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * multiplier)
 
         try {
             audioRecord = AudioRecord(
@@ -113,10 +119,12 @@ class AudioRecordCapture {
     }
 
     private fun captureLoop() {
-        try {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-        } catch (_: Exception) {
-            // ignore
+        if (tuningMode == AudioTuningMode.ROBUST) {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+            } catch (_: Exception) {
+                // ignore
+            }
         }
 
         val frameBuffer = ByteArray(AudioConfig.BYTES_PER_FRAME)

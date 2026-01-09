@@ -20,15 +20,12 @@ class AudioTrackPlayer {
 
     companion object {
         private const val TAG = "AudioTrackPlayer"
-        /** 最大缓冲帧数（防止内存溢出）*/
-        private const val MAX_BUFFER_FRAMES = 100 // 2 秒
-        /** 预缓冲帧数（启动/重缓冲时先攒几帧，抵抗网络抖动） */
-        private const val PREBUFFER_FRAMES = 4 // 80ms
     }
 
     private var audioTrack: AudioTrack? = null
     private val isPlaying = AtomicBoolean(false)
     private var playThread: Thread? = null
+    private var tuningMode: AudioTuningMode = AudioTuningMode.ROBUST
 
     // 帧缓冲队列
     private val frameQueue = ConcurrentLinkedQueue<ByteArray>()
@@ -60,6 +57,10 @@ class AudioTrackPlayer {
     /** 欠载次数 */
     val underrunCount: Long get() = underruns.get()
 
+    fun setTuningMode(mode: AudioTuningMode) {
+        tuningMode = mode
+    }
+
     /**
      * 开始播放
      */
@@ -80,8 +81,8 @@ class AudioTrackPlayer {
             return false
         }
 
-        // 使用较大的缓冲区（提升抗抖动能力，代价是延迟略增）
-        val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * 8) // 160ms
+        val cfg = configForMode(tuningMode)
+        val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * cfg.audioTrackBufferFramesMultiplier)
 
         try {
             val builder = AudioTrack.Builder()
@@ -101,7 +102,7 @@ class AudioTrackPlayer {
                 .setBufferSizeInBytes(actualBufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (cfg.performanceModeLowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             }
 
@@ -123,8 +124,12 @@ class AudioTrackPlayer {
             frameQueue.clear()
             bufferedCount.set(0)
 
+            if (cfg.playImmediately) {
+                audioTrack?.play()
+            }
+
             playThread = thread(name = "AudioTrackPlayer") {
-                playLoop()
+                playLoop(cfg)
             }
 
             Log.i(TAG, "开始播放：bufferSize=$actualBufferSize")
@@ -168,14 +173,26 @@ class AudioTrackPlayer {
     fun writeFrame(pcmFrame: ByteArray) {
         if (!isPlaying.get()) return
 
+        val cfg = configForMode(tuningMode)
+
         // 防止缓冲区溢出
-        while (bufferedCount.get() >= MAX_BUFFER_FRAMES) {
-            val dropped = frameQueue.poll() // 丢弃最老的帧
-            if (dropped != null) {
-                bufferedCount.decrementAndGet()
-                framesDropped.incrementAndGet()
-            } else {
-                break
+        if (cfg.dropManyWhenOverrun) {
+            while (bufferedCount.get() >= cfg.maxBufferFrames) {
+                val dropped = frameQueue.poll() // 丢弃最老的帧
+                if (dropped != null) {
+                    bufferedCount.decrementAndGet()
+                    framesDropped.incrementAndGet()
+                } else {
+                    break
+                }
+            }
+        } else {
+            if (bufferedCount.get() >= cfg.maxBufferFrames) {
+                val dropped = frameQueue.poll()
+                if (dropped != null) {
+                    bufferedCount.decrementAndGet()
+                    framesDropped.incrementAndGet()
+                }
             }
         }
 
@@ -183,26 +200,25 @@ class AudioTrackPlayer {
         bufferedCount.incrementAndGet()
     }
 
-    private fun playLoop() {
+    private fun playLoop(cfg: PlaybackConfig) {
+        if (cfg.threadPriorityAudio) {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+
         val silenceFrame = ByteArray(AudioConfig.BYTES_PER_FRAME)
-        var playbackStarted = false
+        var playbackStarted = cfg.playImmediately
 
         while (isPlaying.get()) {
             try {
                 val track = audioTrack ?: break
                 
-                // 提高播放线程优先级，减少调度抖动导致的“卡卡”
-                if (!playbackStarted) {
-                    try {
-                        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-                    } catch (_: Exception) {
-                        // ignore
-                    }
-                }
-
                 // 预缓冲：先攒几帧再 play，减少起始/抖动时的欠载
                 if (!playbackStarted) {
-                    if (bufferedCount.get() < PREBUFFER_FRAMES) {
+                    if (cfg.prebufferFrames > 0 && bufferedCount.get() < cfg.prebufferFrames) {
                         Thread.sleep(5)
                         continue
                     }
@@ -232,6 +248,9 @@ class AudioTrackPlayer {
                     // 缓冲区空，播放静音以保持流畅
                     underruns.incrementAndGet()
                     track.write(silenceFrame, 0, silenceFrame.size)
+                    if (cfg.sleepOnUnderrun) {
+                        Thread.sleep(AudioConfig.FRAME_MS.toLong() / 2)
+                    }
                 }
             } catch (e: InterruptedException) {
                 Log.i(TAG, "播放线程被中断")
@@ -244,5 +263,41 @@ class AudioTrackPlayer {
         }
 
         Log.i(TAG, "播放循环结束")
+    }
+
+    private data class PlaybackConfig(
+        val maxBufferFrames: Int,
+        val prebufferFrames: Int,
+        val audioTrackBufferFramesMultiplier: Int,
+        val threadPriorityAudio: Boolean,
+        val performanceModeLowLatency: Boolean,
+        val sleepOnUnderrun: Boolean,
+        val playImmediately: Boolean,
+        val dropManyWhenOverrun: Boolean,
+    )
+
+    private fun configForMode(mode: AudioTuningMode): PlaybackConfig {
+        return when (mode) {
+            AudioTuningMode.LEGACY -> PlaybackConfig(
+                maxBufferFrames = 50,
+                prebufferFrames = 0,
+                audioTrackBufferFramesMultiplier = 4,
+                threadPriorityAudio = false,
+                performanceModeLowLatency = false,
+                sleepOnUnderrun = true,
+                playImmediately = true,
+                dropManyWhenOverrun = false,
+            )
+            AudioTuningMode.ROBUST -> PlaybackConfig(
+                maxBufferFrames = 100,
+                prebufferFrames = 4,
+                audioTrackBufferFramesMultiplier = 8,
+                threadPriorityAudio = true,
+                performanceModeLowLatency = true,
+                sleepOnUnderrun = false,
+                playImmediately = false,
+                dropManyWhenOverrun = true,
+            )
+        }
     }
 }

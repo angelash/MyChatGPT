@@ -25,6 +25,7 @@ import com.audiobridge.client.abp.AbpControlMessage
 import com.audiobridge.client.abp.ErrorMessage
 import com.audiobridge.client.abp.WelcomeMessage
 import com.audiobridge.client.audio.AudioBridgeManager
+import com.audiobridge.client.audio.AudioTuningMode
 import com.audiobridge.client.ws.AbpWebSocketClient
 import java.util.UUID
 import kotlin.math.min
@@ -49,6 +50,7 @@ class AudioBridgeForegroundService : Service() {
         const val EXTRA_TOKEN = "token"
         const val EXTRA_ENABLE_UPLINK = "enableUplink"
         const val EXTRA_ENABLE_DOWNLINK = "enableDownlink"
+        const val EXTRA_TUNING_MODE = "tuningMode"
 
         private const val CHANNEL_ID = "audiobridge"
         private const val NOTIFICATION_ID = 1001
@@ -59,11 +61,13 @@ class AudioBridgeForegroundService : Service() {
         private const val KEY_TOKEN = "fgsToken"
         private const val KEY_ENABLE_UPLINK = "fgsEnableUplink"
         private const val KEY_ENABLE_DOWNLINK = "fgsEnableDownlink"
+        private const val KEY_TUNING_MODE = "fgsTuningMode"
     }
 
     data class Snapshot(
         val wsState: AbpWebSocketClient.State,
         val selectedCodec: String,
+        val tuningMode: AudioTuningMode,
         val enableUplink: Boolean,
         val enableDownlink: Boolean,
         val captureRunning: Boolean,
@@ -97,6 +101,7 @@ class AudioBridgeForegroundService : Service() {
     private var token: String? = null
     private var enableUplink: Boolean = true
     private var enableDownlink: Boolean = true
+    private var tuningMode: AudioTuningMode = AudioTuningMode.ROBUST
     private var lastError: String? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -149,6 +154,8 @@ class AudioBridgeForegroundService : Service() {
                 token = intent.getStringExtra(EXTRA_TOKEN)?.takeIf { it.isNotBlank() }
                 enableUplink = intent.getBooleanExtra(EXTRA_ENABLE_UPLINK, true)
                 enableDownlink = intent.getBooleanExtra(EXTRA_ENABLE_DOWNLINK, true)
+                tuningMode = AudioTuningMode.fromId(intent.getIntExtra(EXTRA_TUNING_MODE, AudioTuningMode.ROBUST.id))
+                audioManager.setTuningMode(tuningMode)
 
                 desiredRunning = true
                 persistDesiredConfig()
@@ -185,6 +192,7 @@ class AudioBridgeForegroundService : Service() {
         return Snapshot(
             wsState = wsState,
             selectedCodec = wsClient.selectedCodec,
+            tuningMode = tuningMode,
             enableUplink = enableUplink,
             enableDownlink = enableDownlink,
             captureRunning = audioManager.isCaptureRunning,
@@ -235,6 +243,27 @@ class AudioBridgeForegroundService : Service() {
         updateNotification()
     }
 
+    fun setTuningMode(mode: AudioTuningMode) {
+        if (tuningMode == mode) return
+        tuningMode = mode
+        persistDesiredConfig()
+
+        // 立即应用到音频层；buffer 等参数需要重启录音/播放才能完全生效
+        audioManager.setTuningMode(mode)
+        if (wsState == AbpWebSocketClient.State.CONNECTED) {
+            if (enableDownlink) {
+                audioManager.stopPlayer()
+                audioManager.startPlayer()
+            }
+            if (enableUplink) {
+                audioManager.stopCapture()
+                audioManager.startCapture()
+            }
+        }
+
+        updateNotification()
+    }
+
     private fun connectIfNeeded() {
         if (host.isBlank()) {
             lastError = "Host 为空"
@@ -274,6 +303,7 @@ class AudioBridgeForegroundService : Service() {
                     lastError = null
 
                     // 收到 Welcome 后启动音频（按当前开关）
+                    audioManager.setTuningMode(tuningMode)
                     audioManager.start(enableUplink, enableDownlink)
                     acquireWakeLock()
 
@@ -414,6 +444,7 @@ class AudioBridgeForegroundService : Service() {
             if (trafficText.isNotBlank()) {
                 append(" | ").append(trafficText)
             }
+            append(" | ").append(if (tuningMode == AudioTuningMode.LEGACY) "模式A" else "模式B")
             val err = lastError
             if (!err.isNullOrBlank()) {
                 append(" | 错误: ").append(err)
@@ -534,6 +565,8 @@ class AudioBridgeForegroundService : Service() {
         token = sp.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
         enableUplink = sp.getBoolean(KEY_ENABLE_UPLINK, true)
         enableDownlink = sp.getBoolean(KEY_ENABLE_DOWNLINK, true)
+        tuningMode = AudioTuningMode.fromId(sp.getInt(KEY_TUNING_MODE, AudioTuningMode.ROBUST.id))
+        audioManager.setTuningMode(tuningMode)
         desiredRunning = true
 
         ensureForegroundStarted()
@@ -548,6 +581,7 @@ class AudioBridgeForegroundService : Service() {
             .putString(KEY_TOKEN, token ?: "")
             .putBoolean(KEY_ENABLE_UPLINK, enableUplink)
             .putBoolean(KEY_ENABLE_DOWNLINK, enableDownlink)
+            .putInt(KEY_TUNING_MODE, tuningMode.id)
             .apply()
     }
 

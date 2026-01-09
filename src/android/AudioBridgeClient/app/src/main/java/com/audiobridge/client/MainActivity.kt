@@ -13,11 +13,14 @@ import android.os.IBinder
 import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.audiobridge.client.audio.AudioTuningMode
 import com.audiobridge.client.service.AudioBridgeForegroundService
 
 class MainActivity : AppCompatActivity() {
@@ -29,6 +32,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connectButton: Button
     private lateinit var uplinkSwitch: Switch
     private lateinit var downlinkSwitch: Switch
+    private lateinit var tuningModeGroup: RadioGroup
+    private lateinit var tuningModeLegacy: RadioButton
+    private lateinit var tuningModeRobust: RadioButton
+
+    private var ignoreTuningModeUiChange: Boolean = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var statusUpdateRunnable: Runnable? = null
@@ -43,6 +51,9 @@ class MainActivity : AppCompatActivity() {
             val b = binder as? AudioBridgeForegroundService.LocalBinder
             service = b?.getService()
             serviceBound = service != null
+            service?.getSnapshot()?.let { snap ->
+                syncTuningModeUi(snap.tuningMode)
+            }
             updateUiOnce()
             startStatusUpdate()
         }
@@ -66,6 +77,9 @@ class MainActivity : AppCompatActivity() {
         connectButton = findViewById(R.id.connectButton)
         uplinkSwitch = findViewById(R.id.uplinkSwitch)
         downlinkSwitch = findViewById(R.id.downlinkSwitch)
+        tuningModeGroup = findViewById(R.id.tuningModeGroup)
+        tuningModeLegacy = findViewById(R.id.tuningModeLegacy)
+        tuningModeRobust = findViewById(R.id.tuningModeRobust)
 
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
@@ -83,6 +97,12 @@ class MainActivity : AppCompatActivity() {
         // 下行开关：当前版本下发给 Service（如果要动态启停播放器，后续可扩展）
         downlinkSwitch.setOnCheckedChangeListener { _, isChecked ->
             service?.setEnableDownlink(isChecked)
+        }
+
+        tuningModeGroup.setOnCheckedChangeListener { _, checkedId ->
+            if (ignoreTuningModeUiChange) return@setOnCheckedChangeListener
+            val mode = if (checkedId == R.id.tuningModeLegacy) AudioTuningMode.LEGACY else AudioTuningMode.ROBUST
+            service?.setTuningMode(mode)
         }
 
         connectButton.setOnClickListener {
@@ -124,6 +144,7 @@ class MainActivity : AppCompatActivity() {
         val token = tokenInput.text?.toString()?.trim().orEmpty()
         val enableUplink = uplinkSwitch.isChecked
         val enableDownlink = downlinkSwitch.isChecked
+        val mode = getSelectedTuningMode()
 
         if (enableUplink && !hasRecordAudioPermission()) {
             requestRecordAudioPermission()
@@ -140,7 +161,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         pendingStartAfterPermission = false
-        startForegroundBridgeService(host, token, enableUplink, enableDownlink)
+        startForegroundBridgeService(host, token, enableUplink, enableDownlink, mode)
         startStatusUpdate()
     }
 
@@ -205,9 +226,12 @@ class MainActivity : AppCompatActivity() {
         connectButton.text = if (snap.wsState == com.audiobridge.client.ws.AbpWebSocketClient.State.CONNECTED) "断开" else "连接"
         statusText.text = "状态：${snap.wsState}"
 
+        syncTuningModeUi(snap.tuningMode)
+
         val status = buildString {
             appendLine("音频状态：")
             appendLine("  协商 codec：${snap.selectedCodec}")
+            appendLine("  调优模式：${if (snap.tuningMode == AudioTuningMode.LEGACY) "模式A（旧）" else "模式B（新）"}")
             appendLine("  上行开关：${if (snap.enableUplink) "✓" else "✗"}")
             appendLine("  下行开关：${if (snap.enableDownlink) "✓" else "✗"}")
             appendLine("  麦克风：${if (snap.captureRunning) "✓" else "✗"}")
@@ -256,17 +280,40 @@ class MainActivity : AppCompatActivity() {
         ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1002)
     }
 
-    private fun startForegroundBridgeService(host: String, token: String, enableUplink: Boolean, enableDownlink: Boolean) {
+    private fun startForegroundBridgeService(
+        host: String,
+        token: String,
+        enableUplink: Boolean,
+        enableDownlink: Boolean,
+        tuningMode: AudioTuningMode,
+    ) {
         val i = Intent(this, AudioBridgeForegroundService::class.java).apply {
             action = AudioBridgeForegroundService.ACTION_START
             putExtra(AudioBridgeForegroundService.EXTRA_HOST, host)
             putExtra(AudioBridgeForegroundService.EXTRA_TOKEN, token)
             putExtra(AudioBridgeForegroundService.EXTRA_ENABLE_UPLINK, enableUplink)
             putExtra(AudioBridgeForegroundService.EXTRA_ENABLE_DOWNLINK, enableDownlink)
+            putExtra(AudioBridgeForegroundService.EXTRA_TUNING_MODE, tuningMode.id)
         }
 
         // Android 8+：必须用 startForegroundService
         ContextCompat.startForegroundService(this, i)
+    }
+
+    private fun getSelectedTuningMode(): AudioTuningMode {
+        return if (tuningModeLegacy.isChecked) AudioTuningMode.LEGACY else AudioTuningMode.ROBUST
+    }
+
+    private fun syncTuningModeUi(mode: AudioTuningMode) {
+        ignoreTuningModeUiChange = true
+        try {
+            when (mode) {
+                AudioTuningMode.LEGACY -> tuningModeLegacy.isChecked = true
+                AudioTuningMode.ROBUST -> tuningModeRobust.isChecked = true
+            }
+        } finally {
+            ignoreTuningModeUiChange = false
+        }
     }
 
     override fun onDestroy() {

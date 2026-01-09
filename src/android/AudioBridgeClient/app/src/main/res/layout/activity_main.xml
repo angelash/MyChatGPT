@@ -83,13 +83,52 @@
                 android:checked="true" />
         </LinearLayout>
 
+        <!-- 音频调优模式（用于 A/B 测试） -->
+        <RadioGroup
+            android:id="@+id/tuningModeGroup"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal"
+            app:layout_constraintTop_toBottomOf="@id/switchContainer"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent">
+
+            <RadioButton
+                android:id="@+id/tuningModeLegacy"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="模式A（旧）" />
+
+            <RadioButton
+                android:id="@+id/tuningModeRobust"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="模式B（新）"
+                android:checked="true" />
+        </RadioGroup>
+
+        <TextView
+            android:id="@+id/tuningModeHint"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="切换模式后建议断开重连，便于对比测试"
+            android:textColor="#666666"
+            android:textSize="12sp"
+            app:layout_constraintTop_toBottomOf="@id/tuningModeGroup"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
         <Button
             android:id="@+id/connectButton"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
             android:text="@string/btn_connect"
-            app:layout_constraintTop_toBottomOf="@id/switchContainer"
+            app:layout_constraintTop_toBottomOf="@id/tuningModeHint"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
