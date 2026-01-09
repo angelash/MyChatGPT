@@ -145,11 +145,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnect() {
+        // 用户“手动断开”= 停止前台服务，并关闭自动重连
+        pendingStartAfterPermission = false
         stopStatusUpdate()
-        val i = Intent(this, AudioBridgeForegroundService::class.java).apply {
-            action = AudioBridgeForegroundService.ACTION_STOP
+        try {
+            service?.requestStop()
+        } catch (_: Exception) {
+            // ignore
         }
-        startService(i)
+
+        // 兜底：即使未绑定也尝试 stopService
+        try {
+            stopService(Intent(this, AudioBridgeForegroundService::class.java))
+        } catch (_: Exception) {
+            // ignore
+        }
+
+        // 解除绑定，确保服务可以真正销毁（否则 bind-only 会继续存活）
+        if (serviceBound) {
+            try {
+                unbindService(serviceConnection)
+            } catch (_: Exception) {
+                // ignore
+            } finally {
+                serviceBound = false
+                service = null
+            }
+        }
         updateUiOnce()
     }
 

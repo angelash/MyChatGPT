@@ -165,6 +165,7 @@ class AudioBridgeForegroundService : Service() {
                 persistDesiredConfig()
                 cancelReconnect()
                 disconnectAndStopSelf()
+                return START_NOT_STICKY
             }
         }
 
