@@ -20,7 +20,7 @@
   - **可靠性/可观测性**：心跳；Windows 状态窗 + 文件日志；Android 状态文本/Logcat
   - **省流优化（上下行）**：ADPCM（IMA）压缩 + 静音停发（DTX）+ bytes/丢弃帧统计
 - **待完善**
-  - 自动重连（Android/Windows）
+  - 自动重连（Windows 待补；Android 已在前台服务内实现指数退避重连 + 网络恢复触发）
   - 一键诊断（测试音/回路测试）
   - 设置 UI（设备/端口/codec 参数可视化）
   - 更完整的 jitter buffer / 缺包处理

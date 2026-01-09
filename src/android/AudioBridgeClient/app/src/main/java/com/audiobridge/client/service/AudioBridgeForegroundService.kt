@@ -7,6 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkRequest
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -19,10 +22,13 @@ import androidx.core.app.NotificationManagerCompat
 import com.audiobridge.client.MainActivity
 import com.audiobridge.client.R
 import com.audiobridge.client.abp.AbpControlMessage
+import com.audiobridge.client.abp.ErrorMessage
 import com.audiobridge.client.abp.WelcomeMessage
 import com.audiobridge.client.audio.AudioBridgeManager
 import com.audiobridge.client.ws.AbpWebSocketClient
 import java.util.UUID
+import kotlin.math.min
+import kotlin.random.Random
 
 /**
  * 前台服务：用于“退后台/锁屏仍保持语音桥接”。
@@ -46,6 +52,13 @@ class AudioBridgeForegroundService : Service() {
 
         private const val CHANNEL_ID = "audiobridge"
         private const val NOTIFICATION_ID = 1001
+
+        private const val PREFS_NAME = "audiobridge"
+        private const val KEY_DESIRED_RUNNING = "fgsDesiredRunning"
+        private const val KEY_HOST = "fgsHost"
+        private const val KEY_TOKEN = "fgsToken"
+        private const val KEY_ENABLE_UPLINK = "fgsEnableUplink"
+        private const val KEY_ENABLE_DOWNLINK = "fgsEnableDownlink"
     }
 
     data class Snapshot(
@@ -79,6 +92,7 @@ class AudioBridgeForegroundService : Service() {
 
     private var startedForeground = false
     private var wsState: AbpWebSocketClient.State = AbpWebSocketClient.State.DISCONNECTED
+    private var desiredRunning: Boolean = false
     private var host: String = ""
     private var token: String? = null
     private var enableUplink: Boolean = true
@@ -86,6 +100,14 @@ class AudioBridgeForegroundService : Service() {
     private var lastError: String? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // 自动重连
+    private var reconnectAttempt: Int = 0
+    private var reconnectRunnable: Runnable? = null
+
+    // 网络变化监听（用于“断网后恢复立即重连”）
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private val notificationTicker = object : Runnable {
         override fun run() {
@@ -100,6 +122,7 @@ class AudioBridgeForegroundService : Service() {
         super.onCreate()
 
         createNotificationChannel()
+        registerNetworkCallbackSafe()
 
         audioManager.onUplinkFrame = { frame ->
             wsClient.sendUplinkFrame(frame)
@@ -114,6 +137,12 @@ class AudioBridgeForegroundService : Service() {
     override fun onBind(intent: Intent): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // START_STICKY 可能导致 intent 为 null：此时尝试恢复上一次“期望运行”的配置
+        if (intent == null) {
+            restoreAndMaybeStartFromPrefs()
+            return START_STICKY
+        }
+
         when (intent?.action) {
             ACTION_START -> {
                 host = intent.getStringExtra(EXTRA_HOST).orEmpty()
@@ -121,12 +150,20 @@ class AudioBridgeForegroundService : Service() {
                 enableUplink = intent.getBooleanExtra(EXTRA_ENABLE_UPLINK, true)
                 enableDownlink = intent.getBooleanExtra(EXTRA_ENABLE_DOWNLINK, true)
 
+                desiredRunning = true
+                persistDesiredConfig()
+                cancelReconnect()
+                reconnectAttempt = 0
+
                 ensureForegroundStarted()
                 connectIfNeeded()
             }
 
             ACTION_STOP -> {
                 Log.i(TAG, "Stop requested")
+                desiredRunning = false
+                persistDesiredConfig()
+                cancelReconnect()
                 disconnectAndStopSelf()
             }
         }
@@ -138,6 +175,7 @@ class AudioBridgeForegroundService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         mainHandler.removeCallbacks(notificationTicker)
+        unregisterNetworkCallbackSafe()
         disconnectInternal()
         releaseWakeLock()
     }
@@ -164,6 +202,9 @@ class AudioBridgeForegroundService : Service() {
     }
 
     fun requestStop() {
+        desiredRunning = false
+        persistDesiredConfig()
+        cancelReconnect()
         disconnectAndStopSelf()
     }
 
@@ -219,6 +260,10 @@ class AudioBridgeForegroundService : Service() {
                     if (state == AbpWebSocketClient.State.DISCONNECTED) {
                         audioManager.stop()
                         releaseWakeLock()
+                        scheduleReconnectIfNeeded("disconnected")
+                    } else if (state == AbpWebSocketClient.State.CONNECTED) {
+                        // WebSocket 已打开，但音频要等 Welcome 才启动
+                        cancelReconnect()
                     }
                     updateNotification()
                 }
@@ -230,6 +275,10 @@ class AudioBridgeForegroundService : Service() {
                     // 收到 Welcome 后启动音频（按当前开关）
                     audioManager.start(enableUplink, enableDownlink)
                     acquireWakeLock()
+
+                    // 握手完成，重置重连退避
+                    reconnectAttempt = 0
+                    cancelReconnect()
                     updateNotification()
                 }
 
@@ -250,7 +299,16 @@ class AudioBridgeForegroundService : Service() {
                 }
 
                 override fun onControlMessage(message: AbpControlMessage) {
-                    // v1：暂不处理
+                    if (message is ErrorMessage) {
+                        lastError = "${message.code}: ${message.message}"
+
+                        // 鉴权失败属于“不可恢复错误”，避免无限重连刷屏
+                        if (message.code.equals("AUTH_FAIL", ignoreCase = true)) {
+                            // 直接停止服务，避免前台通知长期驻留
+                            mainHandler.post { requestStop() }
+                        }
+                        updateNotification()
+                    }
                 }
             },
         )
@@ -426,6 +484,109 @@ class AudioBridgeForegroundService : Service() {
         val created = "android-" + UUID.randomUUID().toString()
         sp.edit().putString("deviceId", created).apply()
         return created
+    }
+
+    private fun scheduleReconnectIfNeeded(reason: String) {
+        if (!desiredRunning) return
+        if (host.isBlank()) return
+        if (wsState != AbpWebSocketClient.State.DISCONNECTED) return
+        if (reconnectRunnable != null) return
+
+        val delayMs = computeBackoffDelayMs(reconnectAttempt)
+        reconnectAttempt++
+
+        Log.i(TAG, "schedule reconnect in ${delayMs}ms, attempt=$reconnectAttempt, reason=$reason")
+
+        reconnectRunnable = Runnable {
+            reconnectRunnable = null
+            if (!desiredRunning) return@Runnable
+            if (wsState != AbpWebSocketClient.State.DISCONNECTED) return@Runnable
+            connectIfNeeded()
+        }
+
+        mainHandler.postDelayed(reconnectRunnable!!, delayMs)
+    }
+
+    private fun computeBackoffDelayMs(attempt: Int): Long {
+        // 1s,2s,4s,8s,... capped at 30s, add small jitter
+        val capped = min(attempt, 6) // 2^6 = 64s -> cap 30s anyway
+        val base = 1000L shl capped
+        val cappedBase = min(base, 30_000L)
+        val jitter = Random.nextLong(0L, min(500L, cappedBase / 5 + 1))
+        return cappedBase + jitter
+    }
+
+    private fun cancelReconnect() {
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
+    }
+
+    private fun restoreAndMaybeStartFromPrefs() {
+        val sp = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val shouldRun = sp.getBoolean(KEY_DESIRED_RUNNING, false)
+        if (!shouldRun) {
+            stopSelf()
+            return
+        }
+
+        host = sp.getString(KEY_HOST, "").orEmpty()
+        token = sp.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
+        enableUplink = sp.getBoolean(KEY_ENABLE_UPLINK, true)
+        enableDownlink = sp.getBoolean(KEY_ENABLE_DOWNLINK, true)
+        desiredRunning = true
+
+        ensureForegroundStarted()
+        connectIfNeeded()
+    }
+
+    private fun persistDesiredConfig() {
+        val sp = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        sp.edit()
+            .putBoolean(KEY_DESIRED_RUNNING, desiredRunning)
+            .putString(KEY_HOST, host)
+            .putString(KEY_TOKEN, token ?: "")
+            .putBoolean(KEY_ENABLE_UPLINK, enableUplink)
+            .putBoolean(KEY_ENABLE_DOWNLINK, enableDownlink)
+            .apply()
+    }
+
+    private fun registerNetworkCallbackSafe() {
+        if (networkCallback != null) return
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            connectivityManager = cm
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (!desiredRunning) return
+                    if (wsState == AbpWebSocketClient.State.DISCONNECTED) {
+                        Log.i(TAG, "Network available -> trigger reconnect")
+                        cancelReconnect()
+                        // 立即重连（不等退避），但仍受 wsState=DISCONNECTED 限制
+                        mainHandler.post { connectIfNeeded() }
+                    }
+                }
+            }
+
+            cm.registerNetworkCallback(NetworkRequest.Builder().build(), cb)
+            networkCallback = cb
+        } catch (e: SecurityException) {
+            Log.w(TAG, "registerNetworkCallback denied (missing ACCESS_NETWORK_STATE?)", e)
+        } catch (e: Exception) {
+            Log.w(TAG, "registerNetworkCallback failed", e)
+        }
+    }
+
+    private fun unregisterNetworkCallbackSafe() {
+        val cm = connectivityManager ?: return
+        val cb = networkCallback ?: return
+        try {
+            cm.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {
+            // ignore
+        } finally {
+            networkCallback = null
+            connectivityManager = null
+        }
     }
 }
 
