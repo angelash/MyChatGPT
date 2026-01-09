@@ -12,6 +12,7 @@ internal sealed class TrayAppContext : ApplicationContext
     private readonly ToolStripMenuItem _stopMenuItem;
     private readonly FileLogger _logger;
     private readonly StatusForm _statusForm;
+    private readonly SettingsForm _settingsForm;
     private TrayState _state = TrayState.Stopped;
     private AbpWebSocketServer? _server;
     private AudioBridgeService? _audioService;
@@ -25,6 +26,7 @@ internal sealed class TrayAppContext : ApplicationContext
         _stopMenuItem = new ToolStripMenuItem("Stop", null, (_, _) => Stop()) { Enabled = false };
 
         var showStatusItem = new ToolStripMenuItem("Show Status", null, (_, _) => ShowStatus());
+        var showSettingsItem = new ToolStripMenuItem("Settings", null, (_, _) => ShowSettings());
         var showDevicesItem = new ToolStripMenuItem("Show Devices", null, (_, _) => ShowDevices());
         var openLogItem = new ToolStripMenuItem("Open Log File", null, (_, _) => OpenLogFile());
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitApp());
@@ -34,6 +36,7 @@ internal sealed class TrayAppContext : ApplicationContext
         menu.Items.Add(_stopMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(showStatusItem);
+        menu.Items.Add(showSettingsItem);
         menu.Items.Add(showDevicesItem);
         menu.Items.Add(openLogItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -57,6 +60,10 @@ internal sealed class TrayAppContext : ApplicationContext
             () => _state.ToString()
         );
 
+        // 创建设置窗口
+        _settingsForm = new SettingsForm();
+        _settingsForm.SetDataSource(() => _server);
+
         UpdateUiForState();
     }
 
@@ -75,6 +82,7 @@ internal sealed class TrayAppContext : ApplicationContext
             }
 
             _statusForm.Dispose();
+            _settingsForm.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _logger.Dispose();
@@ -97,6 +105,12 @@ internal sealed class TrayAppContext : ApplicationContext
     {
         _statusForm.Show();
         _statusForm.BringToFront();
+    }
+
+    private void ShowSettings()
+    {
+        _settingsForm.Show();
+        _settingsForm.BringToFront();
     }
 
     private void ShowDevices()

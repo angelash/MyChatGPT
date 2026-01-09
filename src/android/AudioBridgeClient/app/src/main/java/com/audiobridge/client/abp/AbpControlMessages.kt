@@ -109,6 +109,26 @@ data class MuteDownlinkMessage(val enabled: Boolean) : AbpControlMessage {
     override fun toJson(): String = JSONObject().put("type", type).put("enabled", enabled).toString()
 }
 
+/**
+ * 配置同步消息（服务端 -> 客户端）
+ * 用于动态调整 Android 端的音频参数
+ */
+data class ConfigMessage(
+    val uplinkThreshold: Int? = null,
+    val uplinkMinSilentFrames: Int? = null,
+    val downlinkThreshold: Int? = null,
+    val downlinkMinSilentFrames: Int? = null,
+) : AbpControlMessage {
+    override val type: String = "config"
+    override fun toJson(): String = JSONObject().apply {
+        put("type", type)
+        uplinkThreshold?.let { put("uplinkThreshold", it) }
+        uplinkMinSilentFrames?.let { put("uplinkMinSilentFrames", it) }
+        downlinkThreshold?.let { put("downlinkThreshold", it) }
+        downlinkMinSilentFrames?.let { put("downlinkMinSilentFrames", it) }
+    }.toString()
+}
+
 object AbpControlJson {
     fun parse(json: String): AbpControlMessage {
         val obj = JSONObject(json)
@@ -161,6 +181,12 @@ object AbpControlJson {
             "ptt" -> PttMessage(enabled = obj.getBoolean("enabled"))
             "muteUplink" -> MuteUplinkMessage(enabled = obj.getBoolean("enabled"))
             "muteDownlink" -> MuteDownlinkMessage(enabled = obj.getBoolean("enabled"))
+            "config" -> ConfigMessage(
+                uplinkThreshold = if (obj.has("uplinkThreshold")) obj.getInt("uplinkThreshold") else null,
+                uplinkMinSilentFrames = if (obj.has("uplinkMinSilentFrames")) obj.getInt("uplinkMinSilentFrames") else null,
+                downlinkThreshold = if (obj.has("downlinkThreshold")) obj.getInt("downlinkThreshold") else null,
+                downlinkMinSilentFrames = if (obj.has("downlinkMinSilentFrames")) obj.getInt("downlinkMinSilentFrames") else null,
+            )
             else -> throw IllegalArgumentException("unknown message type: $type")
         }
     }

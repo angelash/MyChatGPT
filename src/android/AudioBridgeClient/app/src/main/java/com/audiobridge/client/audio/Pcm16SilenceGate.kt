@@ -5,13 +5,29 @@ import kotlin.math.abs
 /**
  * PCM16 单声道静音门（用于省流：静音连续一段时间后停止发送）。
  * 使用 avg(|sample|) 做能量估计，配合连续帧计数实现简单 hangover。
+ * 支持动态修改阈值参数。
  */
 class Pcm16SilenceGate(
-    private val thresholdAvgAbs: Int = 120,
-    private val minSilentFramesToSuppress: Int = 10,
+    thresholdAvgAbs: Int = 120,
+    minSilentFramesToSuppress: Int = 10,
 ) {
+    /** 当前静音门阈值（可动态修改） */
+    @Volatile
+    var thresholdAvgAbs: Int = thresholdAvgAbs
+        set(value) { field = value.coerceIn(0, 32767) }
+
+    /** 最小静音帧数（可动态修改） */
+    @Volatile
+    var minSilentFramesToSuppress: Int = minSilentFramesToSuppress
+        set(value) { field = value.coerceIn(1, 100) }
+
     private var silentRun = 0
     private var suppressing = false
+    
+    /** 最后一帧的平均绝对值（用于监控/调试） */
+    @Volatile
+    var lastAvgAbs: Int = 0
+        private set
 
     val isSuppressing: Boolean get() = suppressing
     val silentRunFrames: Int get() = silentRun
@@ -19,6 +35,7 @@ class Pcm16SilenceGate(
     fun reset() {
         silentRun = 0
         suppressing = false
+        lastAvgAbs = 0
     }
 
     /**
@@ -26,6 +43,7 @@ class Pcm16SilenceGate(
      */
     fun shouldSend(pcm16LittleEndian: ByteArray): Boolean {
         val avgAbs = avgAbs(pcm16LittleEndian)
+        lastAvgAbs = avgAbs
         val silent = avgAbs < thresholdAvgAbs
 
         if (silent) {

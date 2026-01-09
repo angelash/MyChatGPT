@@ -36,6 +36,9 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     /// <summary>日志回调（可选）</summary>
     public Action<string, string>? OnLog { get; set; }
 
+    /// <summary>下行静音门（可用于动态调整参数）</summary>
+    public Pcm16SilenceGate DownlinkSilenceGate => _downlinkSilenceGate;
+
     public AbpWebSocketServer(int port, string? token = null)
     {
         _port = port;
@@ -365,6 +368,50 @@ public sealed class AbpWebSocketServer : IAsyncDisposable
     public void SendDownlinkFrame(byte[] pcmPayload, uint timestampSamples = 0)
     {
         _ = SendDownlinkFrameAsync(pcmPayload, timestampSamples);
+    }
+
+    /// <summary>
+    /// 发送配置消息到 Android（用于动态调整参数）
+    /// </summary>
+    public async Task SendConfigAsync(
+        int? uplinkThreshold = null,
+        int? uplinkMinSilentFrames = null,
+        int? downlinkThreshold = null,
+        int? downlinkMinSilentFrames = null)
+    {
+        var ws = _activeSession;
+        if (ws is null || ws.State != WebSocketState.Open || !_handshakeDone)
+        {
+            return;
+        }
+
+        var config = new ConfigMessage(
+            UplinkThreshold: uplinkThreshold,
+            UplinkMinSilentFrames: uplinkMinSilentFrames,
+            DownlinkThreshold: downlinkThreshold,
+            DownlinkMinSilentFrames: downlinkMinSilentFrames);
+
+        try
+        {
+            await SendTextAsync(ws, AbpControlJson.Serialize(config), CancellationToken.None);
+            Log("INFO", $"已发送配置: threshold={uplinkThreshold}, frames={uplinkMinSilentFrames}");
+        }
+        catch (Exception ex)
+        {
+            Log("WARN", $"发送配置失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 发送配置消息（同步版本）
+    /// </summary>
+    public void SendConfig(
+        int? uplinkThreshold = null,
+        int? uplinkMinSilentFrames = null,
+        int? downlinkThreshold = null,
+        int? downlinkMinSilentFrames = null)
+    {
+        _ = SendConfigAsync(uplinkThreshold, uplinkMinSilentFrames, downlinkThreshold, downlinkMinSilentFrames);
     }
 
     private static string SelectCodec(string[]? clientCodecs)

@@ -47,6 +47,8 @@ public static class AbpControlJson
                 ?? throw new JsonException("failed to deserialize muteUplink"),
             "muteDownlink" => JsonSerializer.Deserialize<MuteDownlinkMessage>(json, Options)
                 ?? throw new JsonException("failed to deserialize muteDownlink"),
+            "config" => JsonSerializer.Deserialize<ConfigMessage>(json, Options)
+                ?? throw new JsonException("failed to deserialize config"),
             _ => throw new JsonException($"unknown message type: {type}"),
         };
     }

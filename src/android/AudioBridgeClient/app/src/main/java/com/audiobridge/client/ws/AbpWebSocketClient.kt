@@ -11,6 +11,7 @@ import com.audiobridge.client.abp.HelloMessage
 import com.audiobridge.client.abp.PingMessage
 import com.audiobridge.client.abp.PongMessage
 import com.audiobridge.client.abp.WelcomeMessage
+import com.audiobridge.client.abp.ConfigMessage
 import com.audiobridge.client.audio.AudioConfig
 import com.audiobridge.client.audio.Pcm16SilenceGate
 import okhttp3.OkHttpClient
@@ -66,8 +67,11 @@ class AbpWebSocketClient(
     // 上行序列号
     private val uplinkSeq = AtomicLong(0)
 
-    // 省流：上行静音门（VAD/DTX）
-    private val uplinkSilenceGate = Pcm16SilenceGate(thresholdAvgAbs = 120, minSilentFramesToSuppress = 10)
+    // 省流：上行静音门（VAD/DTX）- 可通过 config 消息动态修改参数
+    private val _uplinkSilenceGate = Pcm16SilenceGate(thresholdAvgAbs = 120, minSilentFramesToSuppress = 10)
+    
+    /** 上行静音门（可用于监控或动态调整参数） */
+    val uplinkSilenceGate: Pcm16SilenceGate get() = _uplinkSilenceGate
 
     // 流量/帧统计（网络层：按“实际发送/接收”计）
     private val uplinkFramesSent = AtomicLong(0)
@@ -103,7 +107,7 @@ class AbpWebSocketClient(
         setState(State.CONNECTING, callbacks)
         currentCallbacks = callbacks
         selectedCodecName = "pcm"
-        uplinkSilenceGate.reset()
+        _uplinkSilenceGate.reset()
         uplinkFramesSent.set(0)
         uplinkFramesSuppressed.set(0)
         uplinkPayloadBytesSent.set(0)
@@ -159,12 +163,19 @@ class AbpWebSocketClient(
                                 heartbeatIntervalMs = msg.server.heartbeatMs.toLong()
                                 // 记录协商出的 codec（用于音频帧编解码）
                                 selectedCodecName = msg.selected.codec
-                                uplinkSilenceGate.reset()
+                                _uplinkSilenceGate.reset()
                                 startHeartbeat()
                                 callbacks.onWelcome(msg)
                             }
                             is PongMessage -> {
                                 Log.d(TAG, "Received Pong: t=${msg.t}")
+                                callbacks.onControlMessage(msg)
+                            }
+                            is ConfigMessage -> {
+                                Log.i(TAG, "Received Config: uplinkThreshold=${msg.uplinkThreshold}, uplinkMinSilentFrames=${msg.uplinkMinSilentFrames}")
+                                // 应用配置到静音门
+                                msg.uplinkThreshold?.let { _uplinkSilenceGate.thresholdAvgAbs = it }
+                                msg.uplinkMinSilentFrames?.let { _uplinkSilenceGate.minSilentFramesToSuppress = it }
                                 callbacks.onControlMessage(msg)
                             }
                             else -> callbacks.onControlMessage(msg)
@@ -237,7 +248,7 @@ class AbpWebSocketClient(
         ws = null
         currentCallbacks?.let { setState(State.DISCONNECTED, it) }
         currentCallbacks = null
-        uplinkSilenceGate.reset()
+        _uplinkSilenceGate.reset()
     }
     
     private fun startHeartbeat() {
@@ -270,7 +281,7 @@ class AbpWebSocketClient(
         if (state != State.CONNECTED) return
 
         // 省流：静音连续一段时间后停止发送
-        if (!uplinkSilenceGate.shouldSend(pcmPayload)) {
+        if (!_uplinkSilenceGate.shouldSend(pcmPayload)) {
             uplinkFramesSuppressed.incrementAndGet()
             return
         }

@@ -91,3 +91,18 @@ public sealed record MuteDownlinkMessage(
     public string Type => "muteDownlink";
 }
 
+/// <summary>
+/// 配置同步消息（服务端 -> 客户端）
+/// 用于动态调整 Android 端的音频参数
+/// </summary>
+public sealed record ConfigMessage(
+    [property: JsonPropertyName("uplinkThreshold")] int? UplinkThreshold,
+    [property: JsonPropertyName("uplinkMinSilentFrames")] int? UplinkMinSilentFrames,
+    [property: JsonPropertyName("downlinkThreshold")] int? DownlinkThreshold,
+    [property: JsonPropertyName("downlinkMinSilentFrames")] int? DownlinkMinSilentFrames
+) : IAbpControlMessage
+{
+    [JsonPropertyName("type")]
+    public string Type => "config";
+}
+

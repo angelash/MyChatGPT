@@ -3,13 +3,15 @@ namespace AudioBridge.Transport.Audio;
 /// <summary>
 /// PCM16 单声道静音门（用于省流：静音连续一段时间后停止发送）。
 /// 使用 avg(|sample|) 做能量估计，配合连续帧计数实现简单的 hangover。
+/// 支持动态修改阈值参数。
 /// </summary>
 public sealed class Pcm16SilenceGate
 {
-    private readonly int _thresholdAvgAbs;
-    private readonly int _minSilentFramesToSuppress;
+    private int _thresholdAvgAbs;
+    private int _minSilentFramesToSuppress;
     private int _silentRun;
     private bool _suppressing;
+    private int _lastAvgAbs; // 最后一次计算的平均绝对值（用于调试/监控）
 
     public Pcm16SilenceGate(int thresholdAvgAbs = 120, int minSilentFramesToSuppress = 10)
     {
@@ -19,13 +21,31 @@ public sealed class Pcm16SilenceGate
         _minSilentFramesToSuppress = minSilentFramesToSuppress;
     }
 
+    /// <summary>当前静音门阈值（可动态修改）</summary>
+    public int ThresholdAvgAbs
+    {
+        get => _thresholdAvgAbs;
+        set => _thresholdAvgAbs = Math.Clamp(value, 0, 32767);
+    }
+
+    /// <summary>最小静音帧数（可动态修改）</summary>
+    public int MinSilentFramesToSuppress
+    {
+        get => _minSilentFramesToSuppress;
+        set => _minSilentFramesToSuppress = Math.Clamp(value, 1, 100);
+    }
+
     public bool IsSuppressing => _suppressing;
     public int SilentRunFrames => _silentRun;
+
+    /// <summary>最后一帧的平均绝对值（用于监控/调试）</summary>
+    public int LastAvgAbs => _lastAvgAbs;
 
     public void Reset()
     {
         _silentRun = 0;
         _suppressing = false;
+        _lastAvgAbs = 0;
     }
 
     /// <summary>
@@ -34,6 +54,7 @@ public sealed class Pcm16SilenceGate
     public bool ShouldSend(ReadOnlySpan<byte> pcm16LittleEndian)
     {
         var avgAbs = AvgAbs(pcm16LittleEndian);
+        _lastAvgAbs = avgAbs;
         var silent = avgAbs < _thresholdAvgAbs;
 
         if (silent)
