@@ -32,6 +32,27 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 2. Windows Agent 把手机上行音频写入：虚拟声卡的 Playback 端（等价“对虚拟线说话”）
 3. Windows Agent 从默认播放设备 loopback 抓到浏览器播出的 TTS → 发到手机
 
+## 0.4 当前成品进度（截至 2026-01-09，与仓库代码对齐）
+
+**已落地**
+
+* 协议：ABP/1.0（二进制帧 + 控制消息 + 测试向量，Windows/Android 双端实现）
+* 传输：Windows WebSocket Server（`/abp`）+ Android WebSocket Client（握手/心跳）
+* 音频闭环：
+
+  * 下行：Windows LoopbackCapture → Android AudioTrack 播放
+  * 上行：Android AudioRecord → Windows VirtualMicRenderer 注入虚拟麦克风
+* 可观测性：Windows 状态窗 + 文件日志；Android 状态文本/Logcat
+* 省流优化（上下行）：ADPCM（IMA）压缩 + 静音停发（DTX）+ bytes/丢弃帧统计
+
+**待完善**
+
+* 自动重连（Android/Windows）
+* 更完整的 jitter buffer / 缺包处理（当前以“可用优先”）
+* PTT/mute 控制消息闭环（目前 UI 开关为主）
+* 一键诊断（测试音/回路测试，WP-DIAG1）
+* 公网安全（WSS/TLS、鉴权增强）
+
 ---
 
 # 文档 1：系统架构与组件划分
@@ -53,7 +74,7 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 * `Session`：连接管理、重连、网络切换
 * `MicCapture`：AudioRecord 采集
 * `SpeakerPlayback`：AudioTrack 播放
-* `Codec`：Opus 编解码（或先 PCM MVP）
+* `Codec`：**PCM/ADPCM（v1 已落地）**，Opus（预留）
 * `UI`：连接页、PTT、静音、状态（延迟/丢包/是否耳机）
 * `AudioRoute`：强制耳机/蓝牙优先（第一版至少做“检测未插耳机就提示”）
 
@@ -101,7 +122,7 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
   "deviceId": "android-xxxx",
   "token": "PSK_TOKEN",
   "cap": {
-    "codec": ["opus"],
+    "codec": ["adpcm", "pcm"],
     "sampleRate": [48000],
     "frameMs": [20],
     "uplink": true,
@@ -112,12 +133,14 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 
 ### Welcome（Windows→Android）
 
+Windows 会从 `cap.codec` 中选择（优先 `adpcm`，不支持则回退 `pcm`）。
+
 ```json
 {
   "type": "welcome",
   "sessionId": "sess-uuid",
   "selected": {
-    "codec": "opus",
+    "codec": "adpcm",
     "sampleRate": 48000,
     "channels": 1,
     "frameMs": 20
@@ -179,7 +202,7 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 4-7   : uint32  seq
 8-11  : uint32  timestampSamples (48kHz sample clock)
 12-13 : uint16  payloadLen
-14..  : payload (Opus bytes)
+14..  : payload (audio bytes; depends on selected.codec)
 ```
 
 **帧粒度**
@@ -187,15 +210,70 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 * `frameMs = 20ms`（推荐）
 * 48kHz 下 20ms = 960 samples
 
+## 2.5.1 payload 定义（按 codec）
+
+### codec = pcm
+
+* payload：`PCM16LE`（mono）
+* `payloadLen`：`960 samples * 2 bytes = 1920 bytes`
+
+### codec = adpcm（IMA ADPCM, mono）
+
+* payload：每帧自包含 IMA ADPCM block（不跨帧依赖）
+* 头部（4 bytes，Little Endian）：
+
+  * `0-1`：`int16 predictor`（第一个样本）
+  * `2`：`uint8 index`（0..88）
+  * `3`：reserved（固定 0）
+* 数据区：`(samplesPerFrame-1)` 个 4-bit nibble，**低 nibble 在前、高 nibble 在后**（与 Windows 端实现一致）
+* `payloadLen`（20ms@48k）：`4 + ceil((960-1)/2) = 4 + 480 = 484 bytes`（约 4x 省流）
+
+### codec = opus（预留）
+
+* payload：Opus 数据（后续引入编解码器再启用）
+
 ## 2.6 抖动缓冲策略（v1 简化版）
 
 接收端维护 `JitterBuffer`：
 
 * 目标缓冲：`60ms`（3 帧）
 * 最大缓冲：`200ms`（超了就丢老包追实时）
-* 缺包：调用 Opus PLC（解码时传 null）或简单静音填充（MVP）
+* 缺包：简单静音填充（MVP）；若 `codec=opus` 可用 PLC
 
 > 第一版别追求极致，追求“不断流 + 不爆音”。
+
+## 2.7 流量优化（v1 已落地）
+
+### 2.7.1 背景：PCM 为何“流量很高”
+
+以 48kHz / mono / PCM16 / 20ms 为例：
+
+* 每帧 `1920 bytes`
+* 每秒 `50 帧`
+* 单向裸数据约 `1920 * 50 = 96,000 B/s ≈ 768 kbps`
+
+双向叠加再加上 WebSocket/网络开销，体感就是“很费流量”。
+
+### 2.7.2 已实现方案（上下行都启用）
+
+* **ADPCM（IMA ADPCM）**：`1920B/frame → 484B/frame`，持续有声音时单向约 **~194 kbps**（约 4x 省流）
+* **静音停发（DTX）**：连续静音一段时间后停止发送音频帧（仅保留心跳/控制消息）
+
+当前默认参数（两端一致）：
+
+* 能量估计：`avg(|sample|)`
+* 静音阈值：`thresholdAvgAbs = 120`
+* 连续静音帧数：`minSilentFramesToSuppress = 10`（≈200ms）
+
+可调位置：
+
+* Windows：`src/windows/AudioBridge.Transport/Audio/Pcm16SilenceGate.cs`
+* Android：`src/android/AudioBridgeClient/app/src/main/java/com/audiobridge/client/audio/Pcm16SilenceGate.kt`
+
+### 2.7.3 可观测性（确认省流是否生效）
+
+* Windows 状态窗：显示协商出的 `codec`、上下行 payload bytes、下行静音丢弃帧数
+* Android 状态页：显示协商 `codec`、上行发送/静音丢弃、上下行 bytes
 
 ---
 
@@ -262,12 +340,15 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 
 ### 3.4.3 Encoder/Decoder
 
-* 推荐：`Concentus.Opus`（纯 C#，AI 写起来省心）
-* 编码参数：
+v1 默认走“**无第三方依赖的省流路径**”，并通过 `Hello/Welcome` 协商：
 
-  * `OpusApplication.OPUS_APPLICATION_VOIP`
-  * 帧长：20ms
-  * 码率：先 24kbps～32kbps（语音够用）
+* `pcm`：PCM16LE（48k/mono/20ms，`payloadLen=1920`）
+* `adpcm`：IMA ADPCM（20ms，`payloadLen=484`，约 4x 省流）
+* `dtx`：静音门（连续静音后停发音频帧）
+
+后续如果你要进一步压到“语音通话级别”的 kbps，可以再引入：
+
+* `opus`：更强压缩与更好音质，但会引入额外依赖（Android 侧通常需要 JNI/预编译）
 
 ### 3.4.4 TransportServer（WebSocket）
 
@@ -308,7 +389,7 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 
 ## 4.1 功能需求（FR）
 
-1. 配置连接：host/port/token（或扫码导入）
+1. 配置连接：host（可含端口或完整 `ws://`）/token（或扫码导入）
 2. 连接状态：连接中/已连接/断线重连
 3. 上行采集：麦克风 PCM → 编码 → 发给 Windows
 4. 下行播放：收到 Windows 音频 → 解码 → AudioTrack 播放
@@ -322,7 +403,7 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 * 采样率：48k
 * 通道：mono
 * 格式：PCM 16bit
-* 读出后按 20ms 切帧（960 samples）→ Opus encode → send
+* 读出后按 20ms 切帧（960 samples）→ 按 `welcome.selected.codec` 编码（`adpcm`/`pcm`）→ send
 
 ### 4.2.2 SpeakerPlayback（AudioTrack）
 
@@ -428,8 +509,8 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 
 **输出**
 
-* Windows：Loopback → Opus encode → send streamId=1
-* Android：recv → Opus decode → 播放
+* Windows：Loopback → 按 `welcome.selected.codec` 编码（`adpcm`/`pcm`）→ send streamId=1
+* Android：recv → 解码（`adpcm`/`pcm`）→ 播放
 
 **验收**
 
@@ -442,13 +523,30 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 
 **输出**
 
-* Android：mic → encode → send streamId=2（支持 PTT）
-* Windows：recv → decode → VirtualMicRenderer
+* Android：mic → 编码（`adpcm`/`pcm`）→ send streamId=2（支持 PTT）
+* Windows：recv → 解码（`adpcm`/`pcm`）→ VirtualMicRenderer
 
 **验收**
 
 * Windows 录音设备电平有变化
 * 浏览器选择虚拟麦克风后，网页语音能识别到你讲话（至少能触发“正在聆听/有声输入”）
+
+---
+
+## WP-OPT1：省流优化（上下行）
+
+**输出**
+
+* codec 协商：`hello.cap.codec` 声明能力，`welcome.selected.codec` 下发选择（优先 `adpcm`）
+* ADPCM：IMA ADPCM 单帧自包含编码（20ms：`1920B → 484B`）
+* 静音停发（DTX）：静音连续一段时间后停止发送音频帧
+* 统计：上下行 payload bytes、静音丢弃帧数、协商 codec 可见
+
+**验收**
+
+* 连接后能看到 `selected.codec=adpcm`（若对端不支持则回退 `pcm`）
+* 持续有声音时，bytes 增长速度约为 PCM 的 ~1/4
+* 静音 ≥200ms 时，上/下行音频帧停发（仅保留心跳/控制消息）
 
 ---
 

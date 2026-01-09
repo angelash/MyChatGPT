@@ -11,23 +11,40 @@
 
 ## 当前状态
 
-- 已落盘：执行准备与决策点、工程初始化建议、推进计划、`proto/` 与 `tests/`、协议测试向量
-- 已创建工程骨架：
-  - Windows：`src/windows/AudioBridge.sln`（托盘宿主 + 协议层 + WS Server 骨架）
-  - Android：`src/android/AudioBridgeClient`（minSdk=21，UI/协议层/WS Client 骨架）
+（2026-01-09）
 
-## 怎么跑起来（当前是 WP4 骨架：只到握手/心跳，不含音频）
+- **已落地**
+  - **协议**：ABP/1.0（二进制帧 + 控制消息 + 测试向量，Windows/Android 双端实现）
+  - **Windows**：托盘程序 + WebSocket Server（`/abp`）+ LoopbackCapture + VirtualMicRenderer
+  - **Android**：App（host/token + 上下行开关）+ WebSocket Client + AudioRecord/AudioTrack
+  - **可靠性/可观测性**：心跳；Windows 状态窗 + 文件日志；Android 状态文本/Logcat
+  - **省流优化（上下行）**：ADPCM（IMA）压缩 + 静音停发（DTX）+ bytes/丢弃帧统计
+- **待完善**
+  - 自动重连（Android/Windows）
+  - 一键诊断（测试音/回路测试）
+  - 设置 UI（设备/端口/codec 参数可视化）
+  - 更完整的 jitter buffer / 缺包处理
+  - 公网安全（WSS/TLS、鉴权增强）
 
-### Windows（托盘 + WS Server）
+## 怎么跑起来（当前已支持双向音频 + 省流）
+
+### Windows（托盘 + 音频桥接 + WS Server）
 
 1. 打开 `src/windows/AudioBridge.sln`
 2. 运行 `AudioBridge.Agent.Tray`
 3. 托盘右键 → **Start**（默认监听 **21347**）
+4. （可选）托盘双击 → 打开状态窗，查看 `codec/bytes/丢弃帧` 统计
 
-### Android（WS Client）
+> 备注：需要先安装虚拟声卡（例如 VB-CABLE），并放行 Windows 防火墙入站端口（21347）。
+
+### Android（AudioBridgeClient）
 
 1. Android Studio 打开 `src/android/AudioBridgeClient`
 2. 运行 App
-3. 填写 Host（Windows 的局域网 IP）+ Port（默认 21347）→ **Connect**
+3. Host 输入支持：
+   - `192.168.1.23:21347`（局域网直连）
+   - `your.domain.com`（如已做端口映射/反代到 WS）
+   - `ws://your.domain.com/abp`（完整 URL）
+4. 点击 **连接**；按需开关 **上行/下行**；状态区会显示协商 `codec` 与 bytes
 
 > 备注：Android 工程如果提示缺少 `gradle-wrapper.jar`，见 `src/android/AudioBridgeClient/README.md` 的导入说明。
