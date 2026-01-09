@@ -23,13 +23,35 @@ if not exist "%EXE_PATH%" (
     )
 )
 
+:: 检查是否已经在运行
+tasklist /fi "imagename eq AudioBridge.Agent.Tray.exe" 2>nul | find /i "AudioBridge.Agent.Tray.exe" >nul
+if not errorlevel 1 (
+    echo [提示] AudioBridge 已在运行中！
+    echo        请查看任务栏右下角的托盘图标。
+    echo.
+    pause
+    exit /b 0
+)
+
 echo [启动] %EXE_PATH%
 echo.
 
 :: 启动程序
 start "" "%EXE_PATH%"
 
-echo [完成] 程序已启动
+echo ========================================
+echo   AudioBridge 已启动！
+echo ========================================
+echo.
+echo 这是一个托盘应用，没有主窗口。
+echo 请查看任务栏右下角的托盘图标。
+echo.
+echo 右键点击图标可以:
+echo   ^> Start/Stop  启动/停止服务
+echo   ^> Show Status 查看状态
+echo   ^> Show Devices 查看音频设备
+echo   ^> Open Log File 打开日志文件
+echo   ^> Exit 退出程序
 echo.
 
 endlocal

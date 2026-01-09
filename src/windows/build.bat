@@ -14,6 +14,14 @@ if "%CONFIG%"=="" set CONFIG=Debug
 echo [配置] %CONFIG%
 echo.
 
+:: 结束已运行的进程（避免文件锁定）
+tasklist /fi "imagename eq AudioBridge.Agent.Tray.exe" 2>nul | find /i "AudioBridge.Agent.Tray.exe" >nul
+if not errorlevel 1 (
+    echo [清理] 正在结束已运行的 AudioBridge 进程...
+    taskkill /f /im AudioBridge.Agent.Tray.exe >nul 2>&1
+    timeout /t 1 /nobreak >nul
+)
+
 :: 还原 NuGet 包
 echo [1/2] 正在还原 NuGet 包...
 dotnet restore AudioBridge.sln
