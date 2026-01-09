@@ -4,9 +4,12 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
+import android.os.Process
 import android.util.Log
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
@@ -18,7 +21,9 @@ class AudioTrackPlayer {
     companion object {
         private const val TAG = "AudioTrackPlayer"
         /** 最大缓冲帧数（防止内存溢出）*/
-        private const val MAX_BUFFER_FRAMES = 50 // 1 秒
+        private const val MAX_BUFFER_FRAMES = 100 // 2 秒
+        /** 预缓冲帧数（启动/重缓冲时先攒几帧，抵抗网络抖动） */
+        private const val PREBUFFER_FRAMES = 4 // 80ms
     }
 
     private var audioTrack: AudioTrack? = null
@@ -27,6 +32,7 @@ class AudioTrackPlayer {
 
     // 帧缓冲队列
     private val frameQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val bufferedCount = AtomicInteger(0)
 
     // 统计
     private val framesPlayed = AtomicLong(0)
@@ -40,7 +46,7 @@ class AudioTrackPlayer {
     val isRunning: Boolean get() = isPlaying.get()
 
     /** 缓冲队列中的帧数 */
-    val bufferedFrames: Int get() = frameQueue.size
+    val bufferedFrames: Int get() = bufferedCount.get()
 
     /** 缓冲时长（毫秒）*/
     val bufferedMs: Int get() = bufferedFrames * AudioConfig.FRAME_MS
@@ -74,11 +80,11 @@ class AudioTrackPlayer {
             return false
         }
 
-        // 使用较大的缓冲区
-        val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * 4)
+        // 使用较大的缓冲区（提升抗抖动能力，代价是延迟略增）
+        val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * 8) // 160ms
 
         try {
-            audioTrack = AudioTrack.Builder()
+            val builder = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -94,7 +100,12 @@ class AudioTrackPlayer {
                 )
                 .setBufferSizeInBytes(actualBufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            }
+
+            audioTrack = builder.build()
 
             if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
                 onError?.invoke("AudioTrack 初始化失败")
@@ -103,7 +114,6 @@ class AudioTrackPlayer {
                 return false
             }
 
-            audioTrack?.play()
             isPlaying.set(true)
 
             // 重置统计
@@ -111,6 +121,7 @@ class AudioTrackPlayer {
             framesDropped.set(0)
             underruns.set(0)
             frameQueue.clear()
+            bufferedCount.set(0)
 
             playThread = thread(name = "AudioTrackPlayer") {
                 playLoop()
@@ -146,6 +157,7 @@ class AudioTrackPlayer {
         audioTrack?.release()
         audioTrack = null
         frameQueue.clear()
+        bufferedCount.set(0)
 
         Log.i(TAG, "已停止播放")
     }
@@ -157,21 +169,51 @@ class AudioTrackPlayer {
         if (!isPlaying.get()) return
 
         // 防止缓冲区溢出
-        if (frameQueue.size >= MAX_BUFFER_FRAMES) {
-            frameQueue.poll() // 丢弃最老的帧
-            framesDropped.incrementAndGet()
+        while (bufferedCount.get() >= MAX_BUFFER_FRAMES) {
+            val dropped = frameQueue.poll() // 丢弃最老的帧
+            if (dropped != null) {
+                bufferedCount.decrementAndGet()
+                framesDropped.incrementAndGet()
+            } else {
+                break
+            }
         }
 
         frameQueue.offer(pcmFrame)
+        bufferedCount.incrementAndGet()
     }
 
     private fun playLoop() {
         val silenceFrame = ByteArray(AudioConfig.BYTES_PER_FRAME)
+        var playbackStarted = false
 
         while (isPlaying.get()) {
             try {
                 val track = audioTrack ?: break
+                
+                // 提高播放线程优先级，减少调度抖动导致的“卡卡”
+                if (!playbackStarted) {
+                    try {
+                        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+                    } catch (_: Exception) {
+                        // ignore
+                    }
+                }
+
+                // 预缓冲：先攒几帧再 play，减少起始/抖动时的欠载
+                if (!playbackStarted) {
+                    if (bufferedCount.get() < PREBUFFER_FRAMES) {
+                        Thread.sleep(5)
+                        continue
+                    }
+                    track.play()
+                    playbackStarted = true
+                }
+
                 val frame = frameQueue.poll()
+                if (frame != null) {
+                    bufferedCount.decrementAndGet()
+                }
 
                 if (frame != null) {
                     val written = track.write(frame, 0, frame.size)
@@ -190,9 +232,6 @@ class AudioTrackPlayer {
                     // 缓冲区空，播放静音以保持流畅
                     underruns.incrementAndGet()
                     track.write(silenceFrame, 0, silenceFrame.size)
-
-                    // 短暂休眠减少 CPU 占用
-                    Thread.sleep(AudioConfig.FRAME_MS.toLong() / 2)
                 }
             } catch (e: InterruptedException) {
                 Log.i(TAG, "播放线程被中断")

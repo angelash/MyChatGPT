@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Process
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -112,6 +113,12 @@ class AudioRecordCapture {
     }
 
     private fun captureLoop() {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+        } catch (_: Exception) {
+            // ignore
+        }
+
         val frameBuffer = ByteArray(AudioConfig.BYTES_PER_FRAME)
         var offset = 0
 
