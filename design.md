@@ -42,6 +42,7 @@ AudioBridge 是一套**Android ⇄ Windows 的双向语音通道**：
 
   * 下行：Windows LoopbackCapture → Android AudioTrack 播放
   * 上行：Android AudioRecord → Windows VirtualMicRenderer 注入虚拟麦克风
+* Android 退后台保活：使用 **ForegroundService（前台服务）** 承载 WS+音频，锁屏/切后台仍可持续工作（有常驻通知）
 * 可观测性：Windows 状态窗 + 文件日志；Android 状态文本/Logcat
 * 省流优化（上下行）：ADPCM（IMA）压缩 + 静音停发（DTX）+ bytes/丢弃帧统计
 
@@ -395,6 +396,7 @@ v1 默认走“**无第三方依赖的省流路径**”，并通过 `Hello/Welco
 4. 下行播放：收到 Windows 音频 → 解码 → AudioTrack 播放
 5. PTT / 静音：可控上行发送
 6. 耳机检测：未插耳机弹出强提示（v1）
+7. **退后台/锁屏仍可用**：连接后启动 ForegroundService，保持网络与录音/播放不断
 
 ## 4.2 音频实现要点
 

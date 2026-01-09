@@ -1,9 +1,15 @@
 package com.audiobridge.client
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
@@ -12,11 +18,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.audiobridge.client.abp.AbpControlMessage
-import com.audiobridge.client.abp.WelcomeMessage
-import com.audiobridge.client.audio.AudioBridgeManager
-import com.audiobridge.client.ws.AbpWebSocketClient
-import java.util.UUID
+import com.audiobridge.client.service.AudioBridgeForegroundService
 
 class MainActivity : AppCompatActivity() {
 
@@ -28,10 +30,30 @@ class MainActivity : AppCompatActivity() {
     private lateinit var uplinkSwitch: Switch
     private lateinit var downlinkSwitch: Switch
 
-    private val wsClient = AbpWebSocketClient()
-    private val audioManager = AudioBridgeManager()
     private val handler = Handler(Looper.getMainLooper())
     private var statusUpdateRunnable: Runnable? = null
+
+    private var service: AudioBridgeForegroundService? = null
+    private var serviceBound: Boolean = false
+
+    private var pendingStartAfterPermission: Boolean = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val b = binder as? AudioBridgeForegroundService.LocalBinder
+            service = b?.getService()
+            serviceBound = service != null
+            updateUiOnce()
+            startStatusUpdate()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            serviceBound = false
+            service = null
+            stopStatusUpdate()
+            updateUiOnce()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,32 +75,42 @@ class MainActivity : AppCompatActivity() {
         uplinkSwitch.isChecked = true
         downlinkSwitch.isChecked = true
 
-        // 上行开关变化时动态启停麦克风
+        // 上行开关变化时动态启停麦克风（服务模式下直接下发到 Service）
         uplinkSwitch.setOnCheckedChangeListener { _, isChecked ->
-            if (audioManager.running) {
-                if (isChecked) {
-                    audioManager.startCapture()
-                } else {
-                    audioManager.stopCapture()
-                }
-            }
+            service?.setEnableUplink(isChecked)
         }
 
-        // 设置音频回调
-        audioManager.onUplinkFrame = { frame ->
-            // 上行音频：麦克风 -> Windows
-            wsClient.sendUplinkFrame(frame)
-        }
-        audioManager.onError = { msg ->
-            runOnUiThread { statusText.text = "音频错误：$msg" }
+        // 下行开关：当前版本下发给 Service（如果要动态启停播放器，后续可扩展）
+        downlinkSwitch.setOnCheckedChangeListener { _, isChecked ->
+            service?.setEnableDownlink(isChecked)
         }
 
         connectButton.setOnClickListener {
-            if (!wsClient.isConnected) {
+            val snap = service?.getSnapshot()
+            val connected = snap?.wsState == com.audiobridge.client.ws.AbpWebSocketClient.State.CONNECTED
+            val connecting = snap?.wsState == com.audiobridge.client.ws.AbpWebSocketClient.State.CONNECTING
+
+            if (!connected && !connecting) {
                 connect()
             } else {
                 disconnect()
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // 绑定服务（不一定已前台运行；仅用于 UI 获取状态/下发控制）
+        bindService(Intent(this, AudioBridgeForegroundService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        stopStatusUpdate()
+        if (serviceBound) {
+            unbindService(serviceConnection)
+            serviceBound = false
+            service = null
         }
     }
 
@@ -90,103 +122,87 @@ class MainActivity : AppCompatActivity() {
         }
 
         val token = tokenInput.text?.toString()?.trim().orEmpty()
-        val deviceId = getOrCreateDeviceId()
-
-        wsClient.connect(
-            host = host,
-            token = token,
-            deviceId = deviceId,
-            callbacks = object : AbpWebSocketClient.Callbacks {
-                override fun onState(state: AbpWebSocketClient.State) {
-                    runOnUiThread {
-                        connectButton.text = if (state == AbpWebSocketClient.State.CONNECTED) "断开" else "连接"
-                        statusText.text = "状态：$state"
-
-                        if (state == AbpWebSocketClient.State.DISCONNECTED) {
-                            stopAudioAndStatusUpdate()
-                        }
-                    }
-                }
-
-                override fun onWelcome(welcome: WelcomeMessage) {
-                    runOnUiThread {
-                        statusText.text = "已连接：codec=${welcome.selected.codec}, sr=${welcome.selected.sampleRate}"
-                        // 收到 Welcome 后启动音频
-                        startAudioAndStatusUpdate()
-                    }
-                }
-
-                override fun onError(message: String) {
-                    runOnUiThread { statusText.text = "错误：$message" }
-                }
-
-                override fun onLog(line: String) {
-                    // MVP：先不做日志面板
-                }
-
-                override fun onDownlinkFrame(pcmPayload: ByteArray) {
-                    // 下行音频：Windows -> Android 播放
-                    audioManager.writeDownlinkFrame(pcmPayload)
-                }
-
-                override fun onControlMessage(message: AbpControlMessage) {
-                    // 处理其他控制消息
-                }
-            },
-        )
-    }
-
-    private fun disconnect() {
-        stopAudioAndStatusUpdate()
-        wsClient.disconnect()
-        connectButton.text = "连接"
-        statusText.text = "未连接"
-    }
-
-    private fun startAudioAndStatusUpdate() {
         val enableUplink = uplinkSwitch.isChecked
         val enableDownlink = downlinkSwitch.isChecked
 
         if (enableUplink && !hasRecordAudioPermission()) {
             requestRecordAudioPermission()
             statusText.text = "需要麦克风权限"
+            pendingStartAfterPermission = true
             return
         }
 
-        audioManager.start(enableUplink, enableDownlink)
+        if (!hasPostNotificationsPermission()) {
+            requestPostNotificationsPermission()
+            statusText.text = "需要通知权限以在后台保持运行"
+            pendingStartAfterPermission = true
+            return
+        }
 
-        // 启动状态更新
+        pendingStartAfterPermission = false
+        startForegroundBridgeService(host, token, enableUplink, enableDownlink)
+        startStatusUpdate()
+    }
+
+    private fun disconnect() {
+        stopStatusUpdate()
+        val i = Intent(this, AudioBridgeForegroundService::class.java).apply {
+            action = AudioBridgeForegroundService.ACTION_STOP
+        }
+        startService(i)
+        updateUiOnce()
+    }
+
+    private fun startStatusUpdate() {
+        if (statusUpdateRunnable != null) return
+        // 启动状态更新（仅 UI）
         statusUpdateRunnable = object : Runnable {
             override fun run() {
-                updateAudioStatus()
+                updateUiOnce()
                 handler.postDelayed(this, 500)
             }
         }
-        handler.post(statusUpdateRunnable!!)
+        statusUpdateRunnable?.let { handler.post(it) }
     }
 
-    private fun stopAudioAndStatusUpdate() {
+    private fun stopStatusUpdate() {
         statusUpdateRunnable?.let { handler.removeCallbacks(it) }
         statusUpdateRunnable = null
-        audioManager.stop()
-        audioStatusText.text = ""
     }
 
-    private fun updateAudioStatus() {
+    private fun updateUiOnce() {
+        val snap = service?.getSnapshot()
+
+        if (snap == null) {
+            connectButton.text = "连接"
+            statusText.text = "未连接"
+            audioStatusText.text = ""
+            return
+        }
+
+        connectButton.text = if (snap.wsState == com.audiobridge.client.ws.AbpWebSocketClient.State.CONNECTED) "断开" else "连接"
+        statusText.text = "状态：${snap.wsState}"
+
         val status = buildString {
             appendLine("音频状态：")
-            appendLine("  麦克风：${if (audioManager.isCaptureRunning) "✓" else "✗"}")
-            appendLine("  播放器：${if (audioManager.isPlayerRunning) "✓" else "✗"}")
-            appendLine("  协商 codec：${wsClient.selectedCodec}")
-            appendLine("  上行捕获帧：${audioManager.uplinkFrames}")
-            appendLine("  上行发送帧：${wsClient.uplinkFramesSentCount}（静音丢弃 ${wsClient.uplinkFramesSuppressedCount}）")
-            appendLine("  上行发送字节：${formatBytes(wsClient.uplinkPayloadBytesSentCount)}")
-            appendLine("  下行播放帧：${audioManager.downlinkFrames}")
-            appendLine("  下行接收帧：${wsClient.downlinkFramesReceivedCount}")
-            appendLine("  下行接收字节：${formatBytes(wsClient.downlinkPayloadBytesReceivedCount)}")
-            appendLine("  播放缓冲：${audioManager.playerBufferedMs}ms")
-            appendLine("  欠载：${audioManager.playerUnderrunCount}")
+            appendLine("  协商 codec：${snap.selectedCodec}")
+            appendLine("  上行开关：${if (snap.enableUplink) "✓" else "✗"}")
+            appendLine("  下行开关：${if (snap.enableDownlink) "✓" else "✗"}")
+            appendLine("  麦克风：${if (snap.captureRunning) "✓" else "✗"}")
+            appendLine("  播放器：${if (snap.playerRunning) "✓" else "✗"}")
+            appendLine("  上行捕获帧：${snap.uplinkFramesCaptured}")
+            appendLine("  上行发送帧：${snap.uplinkFramesSent}（静音丢弃 ${snap.uplinkFramesSuppressed}）")
+            appendLine("  上行发送字节：${formatBytes(snap.uplinkBytesSent)}")
+            appendLine("  下行播放帧：${snap.downlinkFramesPlayed}")
+            appendLine("  下行接收帧：${snap.downlinkFramesReceived}")
+            appendLine("  下行接收字节：${formatBytes(snap.downlinkBytesReceived)}")
+            appendLine("  播放缓冲：${snap.playerBufferedMs}ms")
+            appendLine("  欠载：${snap.playerUnderrunCount}")
+            if (!snap.lastError.isNullOrBlank()) {
+                appendLine("  错误：${snap.lastError}")
+            }
         }
+
         audioStatusText.text = status
     }
 
@@ -207,18 +223,55 @@ class MainActivity : AppCompatActivity() {
         ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1001)
     }
 
-    private fun getOrCreateDeviceId(): String {
-        val sp = getSharedPreferences("audiobridge", MODE_PRIVATE)
-        val existing = sp.getString("deviceId", null)
-        if (!existing.isNullOrBlank()) return existing
-        val created = "android-" + UUID.randomUUID().toString()
-        sp.edit().putString("deviceId", created).apply()
-        return created
+    private fun hasPostNotificationsPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < 33) return true
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestPostNotificationsPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1002)
+    }
+
+    private fun startForegroundBridgeService(host: String, token: String, enableUplink: Boolean, enableDownlink: Boolean) {
+        val i = Intent(this, AudioBridgeForegroundService::class.java).apply {
+            action = AudioBridgeForegroundService.ACTION_START
+            putExtra(AudioBridgeForegroundService.EXTRA_HOST, host)
+            putExtra(AudioBridgeForegroundService.EXTRA_TOKEN, token)
+            putExtra(AudioBridgeForegroundService.EXTRA_ENABLE_UPLINK, enableUplink)
+            putExtra(AudioBridgeForegroundService.EXTRA_ENABLE_DOWNLINK, enableDownlink)
+        }
+
+        // Android 8+：必须用 startForegroundService
+        ContextCompat.startForegroundService(this, i)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopAudioAndStatusUpdate()
-        wsClient.disconnect()
+        stopStatusUpdate()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (!pendingStartAfterPermission) return
+
+        if (requestCode == 1001 || requestCode == 1002) {
+            val enableUplink = uplinkSwitch.isChecked
+            val micOk = !enableUplink || hasRecordAudioPermission()
+            val notifOk = hasPostNotificationsPermission()
+
+            if (micOk && notifOk) {
+                pendingStartAfterPermission = false
+                connect()
+            } else {
+                pendingStartAfterPermission = false
+            }
+        }
     }
 }

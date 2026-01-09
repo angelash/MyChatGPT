@@ -46,5 +46,6 @@
    - `your.domain.com`（如已做端口映射/反代到 WS）
    - `ws://your.domain.com/abp`（完整 URL）
 4. 点击 **连接**；按需开关 **上行/下行**；状态区会显示协商 `codec` 与 bytes
+5. 连接后会出现 **常驻通知**（ForegroundService），退后台/锁屏仍会保持语音桥接；要停止可点通知里的“停止”或在 App 内断开
 
 > 备注：Android 工程如果提示缺少 `gradle-wrapper.jar`，见 `src/android/AudioBridgeClient/README.md` 的导入说明。

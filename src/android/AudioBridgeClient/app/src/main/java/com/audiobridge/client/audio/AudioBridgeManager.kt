@@ -49,6 +49,10 @@ class AudioBridgeManager {
     /** 播放欠载次数 */
     val playerUnderrunCount: Long get() = player.underrunCount
 
+    private fun refreshRunningFlag() {
+        isRunning.set(capture.isRunning || player.isRunning)
+    }
+
     /**
      * 启动音频桥接
      * @param enableUplink 是否启用上行（麦克风）
@@ -63,7 +67,8 @@ class AudioBridgeManager {
         uplinkFrameCount.set(0)
         downlinkFrameCount.set(0)
 
-        var success = true
+        var captureOk = true
+        var playerOk = true
 
         // 启动上行（麦克风捕获）
         if (enableUplink) {
@@ -76,7 +81,7 @@ class AudioBridgeManager {
             }
 
             if (!capture.start()) {
-                success = false
+                captureOk = false
                 Log.e(TAG, "启动麦克风捕获失败")
             }
         }
@@ -88,25 +93,24 @@ class AudioBridgeManager {
             }
 
             if (!player.start()) {
-                success = false
+                playerOk = false
                 Log.e(TAG, "启动音频播放失败")
             }
         }
 
-        isRunning.set(success)
-        Log.i(TAG, "启动完成：uplink=$enableUplink, downlink=$enableDownlink, success=$success")
-        return success
+        // 只要任意方向成功启动，就认为“桥接在运行”（避免部分失败导致 stop() 不工作）
+        refreshRunningFlag()
+        Log.i(TAG, "启动完成：uplink=$enableUplink(ok=$captureOk), downlink=$enableDownlink(ok=$playerOk), running=${isRunning.get()}")
+        return isRunning.get()
     }
 
     /**
      * 停止音频桥接
      */
     fun stop() {
-        if (!isRunning.get()) return
-
         capture.stop()
         player.stop()
-        isRunning.set(false)
+        refreshRunningFlag()
 
         Log.i(TAG, "已停止")
     }
@@ -126,6 +130,7 @@ class AudioBridgeManager {
         }
         
         val result = capture.start()
+        refreshRunningFlag()
         Log.i(TAG, "动态启动麦克风：$result")
         return result
     }
@@ -136,14 +141,41 @@ class AudioBridgeManager {
     fun stopCapture() {
         if (!capture.isRunning) return
         capture.stop()
+        refreshRunningFlag()
         Log.i(TAG, "动态停止麦克风")
+    }
+
+    /**
+     * 动态启动播放器
+     */
+    fun startPlayer(): Boolean {
+        if (player.isRunning) return true
+
+        player.onError = { msg ->
+            onError?.invoke("下行错误：$msg")
+        }
+
+        val result = player.start()
+        refreshRunningFlag()
+        Log.i(TAG, "动态启动播放器：$result")
+        return result
+    }
+
+    /**
+     * 动态停止播放器
+     */
+    fun stopPlayer() {
+        if (!player.isRunning) return
+        player.stop()
+        refreshRunningFlag()
+        Log.i(TAG, "动态停止播放器")
     }
 
     /**
      * 写入下行音频帧（从 Windows 收到的系统声音）
      */
     fun writeDownlinkFrame(pcmFrame: ByteArray) {
-        if (!isRunning.get()) return
+        if (!player.isRunning) return
         downlinkFrameCount.incrementAndGet()
         player.writeFrame(pcmFrame)
     }
