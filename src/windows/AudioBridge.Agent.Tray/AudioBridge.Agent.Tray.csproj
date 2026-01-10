@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\AudioBridge.Core\AudioBridge.Core.csproj" />
@@ -12,5 +12,10 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+
+  <!-- 编译前自动结束旧进程，避免文件锁定 -->
+  <Target Name="KillRunningProcess" BeforeTargets="Build">
+    <Exec Command="taskkill /f /im AudioBridge.Agent.Tray.exe 2>nul || exit 0" IgnoreExitCode="true" />
+  </Target>
 
 </Project>
